@@ -1,9 +1,5 @@
-"""Anomaly Transformer (Xu et al., ICLR 2022) -- the judge model J of §V-B.
+"""Anomaly Transformer (Xu et al., ICLR 2022), ported from github.com/thuml/Anomaly-Transformer."""
 
-A faithful port of the reference implementation (github.com/thuml/Anomaly-Transformer), made
-device-agnostic. Each layer returns its series-association S (softmax self-attention) and its
-prior-association P (a learnable-scale Gaussian kernel over |i - j|).
-"""
 from __future__ import annotations
 
 import math
@@ -33,7 +29,7 @@ class TokenEmbedding(nn.Module):
         self.conv = nn.Conv1d(c_in, d_model, kernel_size=3, padding=1, padding_mode="circular", bias=False)
         nn.init.kaiming_normal_(self.conv.weight, mode="fan_in", nonlinearity="leaky_relu")
 
-    def forward(self, x):  # x: B L C
+    def forward(self, x):
         return self.conv(x.permute(0, 2, 1)).transpose(1, 2)
 
 
@@ -61,10 +57,10 @@ class AnomalyAttention(nn.Module):
         series = self.dropout(torch.softmax(attn, dim=-1))
         out = torch.einsum("bhls,bshd->blhd", series, v)
 
-        sigma = sigma.transpose(1, 2)                       # B H L
+        sigma = sigma.transpose(1, 2)
         sigma = torch.sigmoid(sigma * 5) + 1e-5
         sigma = torch.pow(3, sigma) - 1
-        sigma = sigma.unsqueeze(-1).expand(-1, -1, -1, L)   # B H L L
+        sigma = sigma.unsqueeze(-1).expand(-1, -1, -1, L)
         dist = self.distances[:L, :L]
         prior = 1.0 / (math.sqrt(2 * math.pi) * sigma) * torch.exp(-dist**2 / 2 / sigma**2)
         return out.contiguous(), series, prior, sigma
@@ -134,7 +130,6 @@ class AnomalyTransformer(nn.Module):
 
 
 def kl_rows(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
-    """Row-wise KL(p || q) for (B, H, L, L) association maps, averaged over heads -> (B, L)."""
     res = p * (torch.log(p + 1e-4) - torch.log(q + 1e-4))
     return res.sum(-1).mean(1)
 
@@ -144,11 +139,6 @@ def normalize_prior(p: torch.Tensor) -> torch.Tensor:
 
 
 def minimax_losses(series, prior):
-    """Xu et al.'s minimax terms, averaged over layers.
-
-    series_loss uses a stop-gradient prior (maximize phase widens S away from P);
-    prior_loss uses a stop-gradient series (minimize phase fits P to S).
-    """
     series_loss, prior_loss = 0.0, 0.0
     for s, p in zip(series, prior):
         p = normalize_prior(p)
@@ -159,11 +149,6 @@ def minimax_losses(series, prior):
 
 @torch.no_grad()
 def anomaly_scores(model: AnomalyTransformer, x: torch.Tensor, temperature: float) -> torch.Tensor:
-    """Per-timestep anomaly score for each window, (B, L).
-
-    score = softmax_over_window(-AssDis) * reconstruction error, where
-    AssDis = KL(P||S) + KL(S||P) averaged over layers (Eq. 1).
-    """
     out, series, prior = model(x)
     rec = ((x - out) ** 2).mean(-1)
     ass_dis = 0.0

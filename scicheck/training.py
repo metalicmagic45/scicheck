@@ -1,4 +1,3 @@
-"""One training run under a blueprint b̂, recording one snapshot per batch (§IV phases a/b)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,8 +16,8 @@ from .utils import Timer, derive_seed
 
 @dataclass
 class RunResult:
-    snapshots: np.ndarray    # (n_batches_total, 13 + L)
-    final_loss: float        # mean batch loss over the last epoch
+    snapshots: np.ndarray
+    final_loss: float
     seconds: float
     n_params: int
 
@@ -33,16 +32,11 @@ def train_run(
     device: torch.device,
     flip: float = 0.0,
 ) -> RunResult:
-    """Train ``arch`` at ``width`` on (X, y) for ``cfg.epochs`` epochs of Adam.
-
-    ``seed`` controls model initialization, minibatch order and (if ``flip > 0``) the
-    sign-flip masks -- the only things that vary across repeats in §VI-A.
-    """
     spec = ARCHS[arch]
     torch.manual_seed(derive_seed(seed, "init"))
     model = spec.build(width).to(device)
     params = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.Adam(params, lr=cfg.lr, foreach=True)  # same update; fewer kernels
+    opt = torch.optim.Adam(params, lr=cfg.lr, foreach=True)
     loss_fn = nn.BCEWithLogitsLoss() if spec.task == "binary" else nn.MSELoss()
     attack = SignFlipAttack(flip, derive_seed(seed, "attack"), device) if flip > 0 else None
     batch_gen = torch.Generator().manual_seed(derive_seed(seed, "batches"))

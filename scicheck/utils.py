@@ -11,7 +11,6 @@ import torch
 
 
 def derive_seed(*parts) -> int:
-    """Stable 31-bit seed from an arbitrary tuple (independent of PYTHONHASHSEED)."""
     key = "|".join(str(p) for p in parts).encode()
     return int.from_bytes(hashlib.sha256(key).digest()[:4], "little") & 0x7FFFFFFF
 
@@ -28,8 +27,6 @@ def sync(device: torch.device) -> None:
 
 
 class Timer:
-    """Monotonic wall-clock timer (§VI-B: 'measured in-process with a monotonic wall-clock timer')."""
-
     def __init__(self, device: torch.device | None = None):
         self.device = device
 
@@ -46,7 +43,6 @@ class Timer:
 
 
 def peak_rss_mb() -> float:
-    """Peak resident set size of the *current* process, in MB (OS-level accounting)."""
     if sys.platform == "win32":
         import psutil
 
@@ -54,7 +50,6 @@ def peak_rss_mb() -> float:
     import resource
 
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # Linux reports KiB, macOS reports bytes.
     return peak / 2**20 if sys.platform == "darwin" else peak / 2**10
 
 

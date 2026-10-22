@@ -1,10 +1,3 @@
-"""Single-stage subprocess entry point for the §VI-B memory sweep.
-
-    python -m scicheck.worker job.json
-
-Runs one stage on CPU (training one model, or training the judge and scoring submissions) and
-prints its own peak RSS as the last line, prefixed with SCICHECK_RESULT.
-"""
 from __future__ import annotations
 
 import json

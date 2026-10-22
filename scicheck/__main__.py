@@ -1,11 +1,3 @@
-"""Command-line interface.
-
-    python -m scicheck info        --config configs/paper.yaml
-    python -m scicheck download    --config configs/paper.yaml
-    python -m scicheck accuracy    --config configs/paper.yaml --workers 8 --devices cuda:0,cuda:1
-    python -m scicheck performance --config configs/paper.yaml [--sweep runtime|memory]
-    python -m scicheck report      --config configs/paper.yaml
-"""
 from __future__ import annotations
 
 import argparse
@@ -63,13 +55,12 @@ def main(argv=None):
         sp = sub.add_parser(name)
         sp.add_argument("--config", default="configs/paper.yaml")
         sp.add_argument("--archs", default=None,
-                        help="comma-separated subset of architectures to run, e.g. mlp or cnn,ae "
-                             "(default: all in the config). Lets one job per architecture share a results dir")
+                        help="subset of the config's architectures, e.g. mlp or cnn,ae")
         if name == "accuracy":
             sp.add_argument("--workers", type=int, default=1,
-                            help="parallel worker processes, each handling whole (arch, size, seed) units")
+                            help="parallel worker processes")
             sp.add_argument("--devices", default=None,
-                            help="comma-separated devices assigned round-robin to workers, e.g. cuda:0,cuda:1")
+                            help="devices assigned round-robin to workers, e.g. cuda:0,cuda:1")
             sp.add_argument("--threads", type=int, default=None, help="torch CPU threads per worker")
         if name == "performance":
             sp.add_argument("--sweep", choices=["runtime", "memory"], default=None)

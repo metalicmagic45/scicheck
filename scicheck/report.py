@@ -1,17 +1,3 @@
-"""Builds the paper's evaluation artifacts from saved per-run scores.
-
-  Table IV : mean precision / recall / F1 per (arch, size) and (arch, severity) cell
-  Table V  : pooled FalsePositive / FalseNegative from summed confusion counts
-  Fig. 2   : F1 by model size, one line per severity plus the size-only average
-  Table VI : runtime / memory per (arch, size), from the performance sweeps
-
-Because every run's ϕ, η̄_s and the judge's η̄_v are saved, two further analyses need no
-retraining and are produced alongside:
-  Ablation    : AT check alone vs effective-signal check alone vs both (§V-D predicate)
-  Sensitivity : pooled FalsePositive / FalseNegative over a (θ, ρ) grid
-
-Positive class = malicious; a run is predicted positive when it is rejected.
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,7 +9,7 @@ from .config import Config
 from .experiments.accuracy import collect_runs
 
 ARCH_LABEL = {"mlp": "MLP", "cnn": "CNN", "ae": "AE"}
-SEVERITY_COLORS = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"]  # ordinal blue, light->dark
+SEVERITY_COLORS = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"]
 SEQ_RAMP = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
 INK, INK_MUTED, GRID = "#1f1f1e", "#5f5f5c", "#e4e3df"
 THETA_GRID = [0.05, 0.1, 0.2, 0.3, 0.4, 0.5]
@@ -34,17 +20,13 @@ def size_label(n: int) -> str:
     return f"{n // 1000}k" if n % 1000 == 0 else str(n)
 
 
-# ----------------------------------------------------------------------------- decisions & metrics
-
 def decide(df: pd.DataFrame, theta: float, rho: float, variant: str = "both") -> pd.Series:
-    """Re-apply the acceptance predicate at any (θ, ρ) from saved scores."""
     at_pass = df.phi <= theta
     eta_pass = df.eta_s >= rho * df.eta_v
     return {"both": at_pass & eta_pass, "at": at_pass, "eta": eta_pass}[variant]
 
 
 def expand_cells(df: pd.DataFrame) -> pd.DataFrame:
-    """Honest runs are shared by every severity of a unit; give each severity cell its copy."""
     severities = sorted(df.loc[df.role == "malicious", "flip"].unique())
     honest = df[df.role == "honest"]
     parts = [df[df.role == "malicious"].assign(cell_flip=df.flip)]
@@ -72,12 +54,9 @@ def rates(c: pd.Series) -> pd.Series:
 
 
 def cell_prf(cells: pd.DataFrame, accept: str = "accept") -> pd.DataFrame:
-    """P/R/F1 per (arch, size, severity, seed) cell -- the unit Table IV averages over."""
     keys = ["arch", "target_size", "cell_flip", "seed"]
     return cells.groupby(keys).apply(lambda g: prf(counts(g, accept)), include_groups=False).reset_index()
 
-
-# ----------------------------------------------------------------------------- tables
 
 def _arch_blocks(fn, archs) -> pd.DataFrame:
     blocks = {ARCH_LABEL.get(a, a): fn(a) for a in archs}
@@ -143,7 +122,7 @@ def table_vi(out: Path, archs) -> pd.DataFrame | None:
     perf = out / "performance"
     frames = []
     for pattern, col, label in (("runtime*.csv", "total_s", "Total Time (s)"), ("memory*.csv", "total_mb", "Total Memory (MB)")):
-        files = sorted(perf.glob(pattern))  # runtime_<arch>.csv (or a legacy runtime.csv)
+        files = sorted(perf.glob(pattern))
         if files:
             d = pd.concat([pd.read_csv(f) for f in files]).groupby(["target_size", "arch"])[col].mean().unstack("arch")
             d = d[[a for a in archs if a in d.columns]]
@@ -155,8 +134,6 @@ def table_vi(out: Path, archs) -> pd.DataFrame | None:
     t.index = [size_label(s) for s in t.index]
     return t
 
-
-# ----------------------------------------------------------------------------- figures
 
 def _style(ax):
     ax.spines[["top", "right"]].set_visible(False)
@@ -220,7 +197,7 @@ def figure_sensitivity(sens: pd.DataFrame, archs, theta: float, rho: float, path
                         color="white" if v > 0.55 else INK)
             ax.set_xticks(range(len(RHO_GRID)), [f"{r:g}" for r in RHO_GRID], fontsize=7)
             ax.set_yticks(range(len(THETA_GRID)), [f"{t:g}" for t in THETA_GRID], fontsize=7)
-            if theta in THETA_GRID and rho in RHO_GRID:  # outline the paper's operating point
+            if theta in THETA_GRID and rho in RHO_GRID:
                 ax.add_patch(plt.Rectangle((RHO_GRID.index(rho) - 0.5, THETA_GRID.index(theta) - 0.5), 1, 1,
                                            fill=False, ec=INK, lw=1.5))
             ax.set_title(f"{ARCH_LABEL.get(a, a)} - {m}", fontsize=9, color=INK)
@@ -233,8 +210,6 @@ def figure_sensitivity(sens: pd.DataFrame, archs, theta: float, rho: float, path
     fig.savefig(path, dpi=200)
     plt.close(fig)
 
-
-# ----------------------------------------------------------------------------- markdown
 
 def to_markdown(df: pd.DataFrame, fmt: str = "{:.3f}") -> str:
     cols = [" ".join(str(x) for x in c) if isinstance(c, tuple) else str(c) for c in df.columns]

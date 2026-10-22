@@ -1,4 +1,3 @@
-# Minutes-long end-to-end check of the whole pipeline on real data (not for results).
 name: smoke
 out_dir: results/smoke
 data_dir: data
@@ -14,7 +13,7 @@ train_frac: 0.3
 save_snapshots: true
 
 training:
-  epochs: 5                  # CNN verifier: 15 batches x 5 = 75 snapshots, enough for W=10 splits
+  epochs: 5
 
 judge:
   window: 10

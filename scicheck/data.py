@@ -1,13 +1,3 @@
-"""Datasets of §VI-A / Table III.
-
-  MLP : College-student-placement CSV, 10,000 rows, 8 numeric predictors -> binary Placement.
-        Never shuffled: the verifying scientist gets the first 30% of rows in file order.
-  CNN : 1,500 PetImages (cat/dog), resized to 32x32 RGB. Balanced subsample fixed once.
-  AE  : 3,000 MNIST training digits flattened to 784-d. Subsample fixed once.
-
-The CNN/AE subsamples are drawn once with ``data_seed`` and shuffled so that the verifying
-scientist's first-30% partition contains both classes; they are cached under data/processed.
-"""
 from __future__ import annotations
 
 import io
@@ -36,10 +26,8 @@ IMG_SIZE = 32
 
 @dataclass
 class TaskData:
-    """Full dataset (scientist) and its first-``train_frac`` prefix (verifying scientist)."""
-
     X: np.ndarray
-    y: np.ndarray            # targets; for reconstruction this is X itself
+    y: np.ndarray
     n_verifier: int
 
     @property
@@ -69,8 +57,6 @@ def to_tensors(X: np.ndarray, y: np.ndarray, device: torch.device) -> tuple[torc
     return (torch.as_tensor(X, dtype=torch.float32, device=device),
             torch.as_tensor(y, dtype=torch.float32, device=device))
 
-
-# ----------------------------------------------------------------------------- placement (MLP)
 
 def _find_placement_csv(data_dir: Path) -> Path:
     p = data_dir / "raw" / PLACEMENT_CSV
@@ -105,12 +91,9 @@ def load_placement(data_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     X = df.to_numpy(np.float32)
     if X.shape[1] != 8:
         raise ValueError(f"expected 8 predictors after preprocessing, got {X.shape[1]}: {list(df.columns)}")
-    # Fixed preprocessing (part of the blueprint): z-score every predictor.
     X = (X - X.mean(0)) / np.where(X.std(0) > 0, X.std(0), 1.0)
     return X.astype(np.float32), y
 
-
-# ----------------------------------------------------------------------------- PetImages (CNN)
 
 def load_petimages(data_dir: Path, n: int = N_PETIMAGES, size: int = IMG_SIZE, seed: int = 0):
     cache = data_dir / "processed" / f"petimages_{n}_{size}px_seed{seed}.npz"
@@ -147,13 +130,13 @@ def load_petimages(data_dir: Path, n: int = N_PETIMAGES, size: int = IMG_SIZE, s
                     img = Image.open(io.BytesIO(read(files[i])))
                     img = img.convert("RGB").resize((size, size), Image.BILINEAR)
             except Exception:
-                continue  # the archive contains a handful of corrupt files
+                continue
             images.append(np.asarray(img, dtype=np.uint8))
             labels.append(label)
             got += 1
             if got == per_class:
                 break
-    X = np.stack(images).transpose(0, 3, 1, 2)  # N, C, H, W
+    X = np.stack(images).transpose(0, 3, 1, 2)
     y = np.asarray(labels, dtype=np.uint8)
     order = rng.permutation(len(X))
     X, y = X[order], y[order]
@@ -161,8 +144,6 @@ def load_petimages(data_dir: Path, n: int = N_PETIMAGES, size: int = IMG_SIZE, s
     np.savez_compressed(cache, X=X, y=y)
     return X.astype(np.float32) / 255.0, y.astype(np.float32)
 
-
-# ----------------------------------------------------------------------------- MNIST (AE)
 
 def load_mnist(data_dir: Path, n: int = N_MNIST, seed: int = 0) -> np.ndarray:
     cache = data_dir / "processed" / f"mnist_{n}_seed{seed}.npz"
@@ -177,8 +158,6 @@ def load_mnist(data_dir: Path, n: int = N_MNIST, seed: int = 0) -> np.ndarray:
     np.savez_compressed(cache, X=X)
     return X.astype(np.float32) / 255.0
 
-
-# ----------------------------------------------------------------------------- download
 
 def _download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)

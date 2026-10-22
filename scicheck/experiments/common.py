@@ -10,16 +10,13 @@ import torch
 from ..config import Config
 from ..utils import write_json
 
-# Keys that may change between invocations without invalidating finished results: where things
-# run, and the grid axes (adding seeds or sizes later just adds units).
 _FREE_KEYS = {"device", "out_dir", "data_dir", "name", "architectures", "sizes", "severities", "seeds"}
 
 
 def check_or_write_config(cfg: Config, out: Path, filename: str = "config.json") -> None:
-    """Refuse to mix results produced under different settings in one output directory."""
     path = out / filename
     strip = lambda d: {k: v for k, v in d.items() if k not in _FREE_KEYS}
-    current = strip(json.loads(json.dumps(cfg.to_dict())))  # tuples -> lists, like the stored file
+    current = strip(json.loads(json.dumps(cfg.to_dict())))
     if path.exists():
         stored = strip(json.loads(path.read_text()))
         if stored != current:
@@ -43,15 +40,13 @@ def _init_worker(threads: int | None) -> None:
 
 
 def run_jobs(fn: Callable, jobs: Iterable[tuple], workers: int, devices: list[str], threads: int | None):
-    """Run ``fn(*job, device)`` for every job, in-process or on a spawn pool. Each pool worker
-    is pinned to one entry of ``devices`` (round-robin over worker slots)."""
     jobs = list(jobs)
     if workers <= 1:
         _init_worker(threads)
         for job in jobs:
             yield fn(*job, torch.device(devices[0]))
         return
-    ctx = mp.get_context("spawn")  # CUDA cannot be re-initialized in forked children
+    ctx = mp.get_context("spawn")
     with ctx.Pool(workers, initializer=_init_worker, initargs=(threads,), maxtasksperchild=None) as pool:
         yield from pool.imap_unordered(_Call(fn, devices), jobs)
 

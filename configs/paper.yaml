@@ -1,25 +1,23 @@
-# Settings of the BigData'26 submission (§VI). Every value the paper states is reproduced here;
-# values marked NOT STATED are our choices where the paper is silent.
 name: paper
 out_dir: results/paper
 data_dir: data
-device: auto                 # cuda if available
+device: auto
 deterministic: false
 
 architectures: [mlp, cnn, ae]
-sizes: [100000, 200000, 300000, 400000, 500000]   # paper used 4k-12k
+sizes: [100000, 200000, 300000, 400000, 500000]
 severities: [0.1, 0.2, 0.3, 0.4, 0.5]
-seeds: [0]                  # one verifying scientist / judge per (arch, size); paper used 5 seeds
-n_honest: 5                  # paper used 10
-n_malicious: 5               # per severity; paper used 10
-train_frac: 0.3              # verifying scientist: first 30% of the data; scientists: all of it
-data_seed: 0                 # CNN/AE subsample fixed once and reused across seeds
-save_snapshots: true         # ~1 GB for the full grid; enables post-hoc baselines without retraining
+seeds: [0]
+n_honest: 5
+n_malicious: 5
+train_frac: 0.3
+data_seed: 0
+save_snapshots: true
 
 training:
   epochs: 25
-  batch_size: 32             # NOT STATED
-  lr: 0.001                  # NOT STATED (Adam default)
+  batch_size: 32
+  lr: 0.001
 
 judge:
   window: 30
@@ -27,16 +25,16 @@ judge:
   n_heads: 4
   d_ff: 128
   e_layers: 2
-  dropout: 0.0               # NOT STATED (reference implementation)
+  dropout: 0.0
   lam: 3.0
   epochs: 15
   patience: 5
   lr: 0.0001
   batch_size: 32
-  temperature: 50.0          # NOT STATED (reference implementation)
+  temperature: 50.0
   split: [0.70, 0.15, 0.15]
   r: 0.01
-  eta_baseline: train        # §VI-A; Algorithm 1 line 9 would be "all"
+  eta_baseline: train
   score_batch_size: 1024
 
 validate:
@@ -46,5 +44,5 @@ validate:
 performance:
   n_honest: 5
   n_malicious: 5
-  severity: 0.3              # NOT STATED
+  severity: 0.3
   sweeps: [runtime, memory]

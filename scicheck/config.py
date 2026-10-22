@@ -1,5 +1,3 @@
-"""Experiment configuration. Defaults are the settings reported in §VI of the paper;
-values the paper does not state are marked NOT STATED and are our choices."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields
@@ -10,44 +8,42 @@ import yaml
 
 @dataclass
 class TrainingConfig:
-    epochs: int = 25            # §VI-A
-    batch_size: int = 32        # NOT STATED
-    lr: float = 1e-3            # NOT STATED (Adam default); optimizer is Adam per §VI-A
+    epochs: int = 25
+    batch_size: int = 32
+    lr: float = 1e-3
 
 
 @dataclass
 class JudgeConfig:
-    window: int = 30            # W
+    window: int = 30
     d_model: int = 64
     n_heads: int = 4
     d_ff: int = 128
     e_layers: int = 2
-    dropout: float = 0.0        # NOT STATED (Xu et al. reference implementation default)
-    lam: float = 3.0            # association-discrepancy weight λ
+    dropout: float = 0.0
+    lam: float = 3.0
     epochs: int = 15
     patience: int = 5
     lr: float = 1e-4
     batch_size: int = 32
-    temperature: float = 50.0   # NOT STATED (Xu et al. reference implementation)
+    temperature: float = 50.0
     split: tuple[float, float, float] = (0.70, 0.15, 0.15)
-    r: float = 0.01             # τ = (1 - r)-quantile of the validation timeline
-    # Alg. 1 line 9 takes η̄_v over all of T; §VI-A says the baseline is computed only from
-    # T_train. The experiments section describes what was run, so "train" is the default.
-    eta_baseline: str = "train"  # "train" | "all"
-    score_batch_size: int = 1024  # inference batch size (no effect on results)
+    r: float = 0.01
+    eta_baseline: str = "train"
+    score_batch_size: int = 1024
 
 
 @dataclass
 class ValidateConfig:
-    theta: float = 0.3          # flagged-window fraction threshold θ
-    rho: float = 0.4            # effective-signal ratio ρ, γ = ρ·η̄_v
+    theta: float = 0.3
+    rho: float = 0.4
 
 
 @dataclass
 class PerformanceConfig:
     n_honest: int = 10
     n_malicious: int = 10
-    severity: float = 0.3       # NOT STATED: flip used by the 10 malicious runs in §VI-B
+    severity: float = 0.3
     sweeps: tuple[str, ...] = ("runtime", "memory")
 
 
@@ -56,17 +52,17 @@ class Config:
     name: str = "paper"
     out_dir: str = "results/paper"
     data_dir: str = "data"
-    device: str = "auto"         # auto -> cuda if available; CLI --devices overrides per worker
-    deterministic: bool = False  # force deterministic cuDNN kernels (slower on GPU)
+    device: str = "auto"
+    deterministic: bool = False
     architectures: list[str] = field(default_factory=lambda: ["mlp", "cnn", "ae"])
     sizes: list[int] = field(default_factory=lambda: [4000, 6000, 8000, 10000, 12000])
     severities: list[float] = field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5])
     seeds: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
     n_honest: int = 10
     n_malicious: int = 10
-    train_frac: float = 0.3     # verifying scientist trains on the first 30% of the data
-    data_seed: int = 0          # fixes the CNN/AE subsample once for all seeds
-    save_snapshots: bool = True  # keep every run's snapshot sequence for post-hoc analysis
+    train_frac: float = 0.3
+    data_seed: int = 0
+    save_snapshots: bool = True
     training: TrainingConfig = field(default_factory=TrainingConfig)
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     validate: ValidateConfig = field(default_factory=ValidateConfig)

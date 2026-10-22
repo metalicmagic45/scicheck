@@ -1,4 +1,3 @@
-"""Algorithm 1 (training the judge model J) and Algorithm 2 (validating a submitted run)."""
 from __future__ import annotations
 
 import copy
@@ -16,11 +15,11 @@ from .snapshots import ETA_COL
 @dataclass
 class Judge:
     model: AnomalyTransformer
-    mu: np.ndarray          # (μ_v, σ_v): normalization statistics from T_train
+    mu: np.ndarray
     sd: np.ndarray
-    tau: float              # per-timestep anomaly-score threshold τ
-    eta_v: float            # verifying scientist's effective-signal baseline η̄_v
-    gamma: float            # effective-signal cutoff γ = ρ·η̄_v
+    tau: float
+    eta_v: float
+    gamma: float
     cfg: JudgeConfig
     diagnostics: dict = field(default_factory=dict)
 
@@ -51,10 +50,10 @@ class Judge:
 @dataclass
 class Verdict:
     accept: bool
-    phi: float              # flagged-window fraction ϕ
-    eta_s: float            # submitted run's mean effective signal η̄_s
-    at_pass: bool           # ϕ <= θ
-    eta_pass: bool          # η̄_s >= γ
+    phi: float
+    eta_s: float
+    at_pass: bool
+    eta_pass: bool
 
 
 def _build_model(cfg: JudgeConfig, c_in: int) -> AnomalyTransformer:
@@ -62,15 +61,12 @@ def _build_model(cfg: JudgeConfig, c_in: int) -> AnomalyTransformer:
 
 
 def sliding_windows(T: np.ndarray, W: int) -> np.ndarray:
-    """All stride-1 windows of length W: (N - W + 1, W, D)."""
     if len(T) < W:
         raise ValueError(f"sequence of length {len(T)} is shorter than the window W={W}")
     return np.lib.stride_tricks.sliding_window_view(T, W, axis=0).transpose(0, 2, 1)
 
 
 def windows_to_timeline(scores: np.ndarray, n: int) -> np.ndarray:
-    """Reassemble per-window, per-position scores into a per-timestep timeline by averaging
-    every window position that covers each timestep."""
     n_win, W = scores.shape
     sums = np.zeros(n)
     counts = np.zeros(n)
@@ -106,18 +102,15 @@ def _eval_losses(model, windows: torch.Tensor, cfg: JudgeConfig) -> tuple[float,
 
 
 def train_judge(T: np.ndarray, cfg: JudgeConfig, rho: float, device: torch.device, seed: int) -> Judge:
-    """Algorithm 1, lines 3-11. ``T`` is the verifying scientist's snapshot sequence (lines 1-2)."""
     N, D = T.shape
     n_tr, n_val = int(N * cfg.split[0]), int(N * cfg.split[1])
     T_tr, T_val, T_te = T[:n_tr], T[n_tr:n_tr + n_val], T[n_tr + n_val:]
 
-    # line 4: normalize with T_train statistics
     mu = T_tr.mean(0)
     sd = T_tr.std(0)
     sd = np.where(sd > 1e-8, sd, 1.0)
     norm = lambda a: ((a - mu) / sd).astype(np.float32)
 
-    # lines 5-6: train J on stride-1 windows of T_train with the minimax strategy
     torch.manual_seed(seed)
     model = _build_model(cfg, D).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
@@ -125,8 +118,6 @@ def train_judge(T: np.ndarray, cfg: JudgeConfig, rho: float, device: torch.devic
     val_w = torch.as_tensor(np.ascontiguousarray(sliding_windows(norm(T_val), cfg.window)), device=device)
     gen = torch.Generator().manual_seed(seed)
 
-    # Early stopping as in the reference implementation: an epoch only counts as an improvement
-    # if both validation objectives improve.
     best1 = best2 = None
     best_state, best_epoch, bad, history = None, 0, 0, []
     for epoch in range(cfg.epochs):
@@ -137,10 +128,10 @@ def train_judge(T: np.ndarray, cfg: JudgeConfig, rho: float, device: torch.devic
             out, series, prior = model(x)
             rec = torch.mean((out - x) ** 2)
             s_loss, p_loss = minimax_losses(series, prior)
-            loss1 = rec - cfg.lam * s_loss   # maximize phase (S pushed away from P)
-            loss2 = rec + cfg.lam * p_loss   # minimize phase (P fitted to S)
+            loss1 = rec - cfg.lam * s_loss
+            loss2 = rec + cfg.lam * p_loss
             opt.zero_grad()
-            (loss1 + loss2).backward()       # == loss1.backward(retain_graph); loss2.backward()
+            (loss1 + loss2).backward()
             opt.step()
         v1, v2 = _eval_losses(model, val_w, cfg)
         history.append((v1, v2))
@@ -154,11 +145,9 @@ def train_judge(T: np.ndarray, cfg: JudgeConfig, rho: float, device: torch.devic
     model.load_state_dict(best_state)
     model.eval()
 
-    # lines 7-8: τ = (1 - r)-quantile of the per-timestep anomaly timeline on T_val
     val_timeline = score_timeline(model, norm(T_val), cfg)
     tau = float(np.quantile(val_timeline, 1.0 - cfg.r))
 
-    # lines 9-10: effective-signal baseline and cutoff
     eta_src = T_tr if cfg.eta_baseline == "train" else T
     eta_v = float(eta_src[:, ETA_COL].mean())
     gamma = rho * eta_v
@@ -167,15 +156,14 @@ def train_judge(T: np.ndarray, cfg: JudgeConfig, rho: float, device: torch.devic
         "n_snapshots": N, "n_train": len(T_tr), "n_val": len(T_val), "n_test": len(T_te),
         "epochs_run": len(history), "best_epoch": best_epoch, "val_history": history,
     }
-    if len(T_te) >= cfg.window:  # held-out honest data: in-sample false-flag rate
+    if len(T_te) >= cfg.window:
         diagnostics["test_flagged_frac"] = float((score_timeline(model, norm(T_te), cfg) > tau).mean())
     return Judge(model, mu, sd, tau, eta_v, gamma, cfg, diagnostics)
 
 
 def validate(judge: Judge, Ts: np.ndarray, theta: float) -> Verdict:
-    """Algorithm 2: accept iff ϕ(T_s) <= θ and η̄_s(T_s) >= γ."""
-    timeline = score_timeline(judge.model, judge.normalize(Ts), judge.cfg)  # lines 1-3
-    phi = float((timeline > judge.tau).mean())                               # line 4
-    eta_s = float(Ts[:, ETA_COL].mean())                                     # line 5
+    timeline = score_timeline(judge.model, judge.normalize(Ts), judge.cfg)
+    phi = float((timeline > judge.tau).mean())
+    eta_s = float(Ts[:, ETA_COL].mean())
     at_pass, eta_pass = phi <= theta, eta_s >= judge.gamma
-    return Verdict(at_pass and eta_pass, phi, eta_s, at_pass, eta_pass)      # lines 6-10
+    return Verdict(at_pass and eta_pass, phi, eta_s, at_pass, eta_pass)

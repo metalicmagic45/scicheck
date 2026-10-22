@@ -1,17 +1,3 @@
-"""§VI-B performance analysis: two independent sweeps over (architecture x size x seed).
-
-Each cell trains 21 models from scratch -- one verifying-scientist model M0 and 20 scientist
-models (10 honest, 10 malicious) -- plus the judge model, which is trained on M0's snapshots
-and scores all 20 submissions.
-
-Runtime: measured in-process with a monotonic wall-clock timer on the configured device (GPU in
-the paper). verifier = training M0; scientists = sum over the 20 sequential runs; judge =
-training J + scoring 20 submissions; total = sum of the three.
-
-Memory: peak RSS via OS-level accounting, with M0, each scientist and the judge each executed in
-its own freshly spawned CPU-only subprocess. scientists = sum of the 20 subprocess peaks; total =
-sum of the three stage figures (not a simultaneous peak).
-"""
 from __future__ import annotations
 
 import json
@@ -55,8 +41,6 @@ def _append(csv: Path, row: dict) -> None:
     pd.DataFrame([row]).to_csv(csv, mode="a", header=not csv.exists(), index=False)
 
 
-# ----------------------------------------------------------------------------- runtime
-
 def runtime_cell(cfg: Config, arch: str, size: int, seed: int, device: torch.device) -> dict:
     data = load_task_data(ARCHS[arch].dataset, cfg.data_dir, cfg.train_frac, cfg.data_seed)
     width = width_for_target(arch, size)
@@ -82,7 +66,7 @@ def run_runtime(cfg: Config, device: torch.device) -> None:
     out.mkdir(parents=True, exist_ok=True)
     for seed in cfg.seeds:
         for arch in cfg.architectures:
-            csv = out / f"runtime_{arch}.csv"  # one file per architecture: parallel jobs never share a file
+            csv = out / f"runtime_{arch}.csv"
             done = _done_keys(csv)
             for size in cfg.sizes:
                 if (arch, size, seed) in done:
@@ -94,10 +78,7 @@ def run_runtime(cfg: Config, device: torch.device) -> None:
                       flush=True)
 
 
-# ----------------------------------------------------------------------------- memory
-
 def _subprocess(job: dict, workdir: Path) -> dict:
-    """Run one stage in a fresh CPU-only interpreter and return its self-reported peak RSS."""
     job_file = workdir / f"job_{job['stage']}_{job.get('tag', '')}.json"
     job_file.write_text(json.dumps(job))
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="")

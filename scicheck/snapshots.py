@@ -1,35 +1,25 @@
-"""§V-A snapshot representation: 13 + L statistics recorded once per training batch.
-
-Per batch the recorder only copies the flat gradient g_t, flat weights w_t and loss_t into a
-preallocated on-device chunk buffer; the statistics are then computed for a whole chunk of
-batches at once. The values are identical to computing them batch by batch, but the per-batch
-cost drops from ~50 small kernels to 3 copies, and the host never syncs with the device.
-"""
 from __future__ import annotations
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-# Order matters: it is the column order of every snapshot sequence (Table II).
 BASE_FEATURES = [
-    # seven phase-invariant dynamics statistics
-    "grad_snr",           # |ḡ_t| / σ_t
-    "loss_delta",         # loss_t - loss_{t-1}
-    "eta",                # η_t = ḡ_t^2 / (ḡ_t^2 + σ_t^2)
-    "grad_norm",          # ||g_t||_2
-    "weight_delta_norm",  # ||w_t - w_{t-1}||_2
-    "loss",               # loss_t
-    "weight_norm",        # ||w_t||_2
-    # six-statistic gradient-shape block
-    "frac_pos",           # Pr[g_{t,i} > 0]
-    "absg_q10", "absg_q50", "absg_q90",  # percentiles of |g_{t,i}|
-    "grad_skew",          # E[z^3]
-    "grad_kurt",          # E[z^4] - 3
+    "grad_snr",
+    "loss_delta",
+    "eta",
+    "grad_norm",
+    "weight_delta_norm",
+    "loss",
+    "weight_norm",
+    "frac_pos",
+    "absg_q10", "absg_q50", "absg_q90",
+    "grad_skew",
+    "grad_kurt",
 ]
 ETA_COL = BASE_FEATURES.index("eta")
 _EPS = 1e-12
-_MAX_QUANTILE_NUMEL = 2**24  # torch.quantile input limit
+_MAX_QUANTILE_NUMEL = 2**24
 
 
 def feature_names(n_layers: int) -> list[str]:
@@ -37,18 +27,11 @@ def feature_names(n_layers: int) -> list[str]:
 
 
 class SnapshotRecorder:
-    """Call ``record(loss)`` once per batch, after ``optimizer.step()``.
-
-    At that point ``p.grad`` still holds the gradient the optimizer just applied (i.e. *after*
-    any tampering) and the parameters hold w_t, so the weight delta is w_t - w_{t-1}.
-    """
-
     def __init__(self, model: nn.Module, tracked: list[nn.Module], chunk: int = 256):
         self.params = [p for p in model.parameters() if p.requires_grad]
         device = self.params[0].device
         n = sum(p.numel() for p in self.params)
 
-        # Each tracked layer's parameters occupy one contiguous slice of the flat vector.
         offset, start_of = 0, {}
         for p in self.params:
             start_of[id(p)] = (offset, offset + p.numel())
@@ -93,7 +76,7 @@ class SnapshotRecorder:
         C2 = C * C
         prev_w = torch.cat([self.prev_w[None], W[:-1]])
         first_loss = L[:1] if self.prev_loss is None else self.prev_loss.reshape(1)
-        prev_l = torch.cat([first_loss, L[:-1]])  # loss_delta of the very first batch is 0
+        prev_l = torch.cat([first_loss, L[:-1]])
         qs = torch.quantile(G.abs(), self.q, dim=1)
 
         cols = [

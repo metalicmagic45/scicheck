@@ -1,4 +1,3 @@
-"""Fast checks that the implementation matches what the paper states (no dataset needed)."""
 import numpy as np
 import pytest
 import torch
@@ -16,7 +15,6 @@ SIZES = [4000, 6000, 8000, 10000, 12000]
 
 def test_param_counts_match_paper_range():
     counts = [count_params(build_for_target(a, s)[0]) for a in ARCHS for s in SIZES]
-    # §VI-A: "the exact parameter counts achieved range from 3,922-12,051 across the three families"
     assert min(counts) == 3922 and max(counts) == 12051
 
 
@@ -27,8 +25,6 @@ def test_snapshot_dim_matches_table_iii(arch, dim):
 
 
 def test_sign_flip_scales_effective_signal():
-    """Flipping a fraction p of entries scales ḡ by (1-2p) and leaves σ ~unchanged, so η shrinks
-    by ~(1-2p)^2 -- the reason flip >= 0.2 falls under γ = 0.4·η̄_v."""
     torch.manual_seed(0)
     g = torch.randn(200_000) * 0.1 + 0.05
     eta = lambda v: float(v.mean() ** 2 / (v.mean() ** 2 + v.var(unbiased=False)))
@@ -47,7 +43,6 @@ def test_attack_flips_requested_fraction():
 
 
 def _reference_snapshot(model, layers, loss, prev_w, prev_loss):
-    """Table II computed naively for one batch."""
     ps = list(model.parameters())
     g = torch.cat([p.grad.reshape(-1) for p in ps]).double()
     w = torch.cat([p.detach().reshape(-1) for p in ps]).double()
@@ -65,7 +60,7 @@ def test_chunked_recorder_matches_naive_reference():
     torch.manual_seed(0)
     model = torch.nn.Sequential(torch.nn.Linear(4, 8), torch.nn.ReLU(), torch.nn.Linear(8, 1))
     layers = tracked_layers(model)
-    rec = SnapshotRecorder(model, layers, chunk=2)  # several flushes across 5 steps
+    rec = SnapshotRecorder(model, layers, chunk=2)
     opt = torch.optim.Adam(model.parameters(), lr=0.05)
     attack = SignFlipAttack(0.3, seed=0, device=torch.device("cpu"))
     prev_w = torch.cat([p.detach().reshape(-1) for p in model.parameters()]).double()
@@ -88,7 +83,7 @@ def test_chunked_recorder_matches_naive_reference():
 
 def test_timeline_reassembly_averages_overlaps():
     n, W = 7, 3
-    scores = np.tile(np.arange(n - W + 1, dtype=float)[:, None], (1, W))  # window i scores i everywhere
+    scores = np.tile(np.arange(n - W + 1, dtype=float)[:, None], (1, W))
     tl = windows_to_timeline(scores, n)
     assert tl[0] == 0 and tl[-1] == n - W
     assert tl[2] == pytest.approx(np.mean([0, 1, 2]))
@@ -109,7 +104,7 @@ def test_end_to_end_on_synthetic_data():
     X = rng.normal(size=(400, 8)).astype(np.float32)
     y = (X[:, 0] + 0.5 * X[:, 1] > 0).astype(np.float32)
     dev = torch.device("cpu")
-    tcfg = TrainingConfig(epochs=10, batch_size=32)  # verifier: 7 batches x 10 = 70 snapshots
+    tcfg = TrainingConfig(epochs=10, batch_size=32)
     ver = train_run("mlp", 10, X[:200], y[:200], tcfg, seed=1, device=dev)
     jcfg = JudgeConfig(window=8, epochs=2, patience=1)
     judge = train_judge(ver.snapshots, jcfg, rho=0.4, device=dev, seed=0)
@@ -120,7 +115,6 @@ def test_end_to_end_on_synthetic_data():
         assert 0 <= v.phi <= 1 and v.eta_s > 0
         assert v.accept == (v.phi <= 0.3 and v.eta_s >= judge.gamma)
     assert judge.gamma == pytest.approx(0.4 * judge.eta_v)
-    # η̄_v comes from T_train (first 70% of the verifier's sequence) by default
     n_tr = int(len(ver.snapshots) * 0.7)
     assert judge.eta_v == pytest.approx(float(ver.snapshots[:n_tr, ETA_COL].mean()), rel=1e-6)
 

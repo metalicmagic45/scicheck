@@ -1,12 +1,3 @@
-"""§VI-A accuracy sweep: architectures x sizes x severities x seeds, 10 honest + 10 malicious
-scientist runs per cell.
-
-The unit of work is one (architecture, size, seed): one verifying-scientist model M0, one judge
-model J, the honest runs, and the malicious runs for every severity. Honest runs never depend on
-the severity, so they are trained once per unit and counted in every severity cell (the paper's
-MLP/AE FalsePositive is identical across severities for the same reason). Each unit writes
-``units/<arch>_<size>_s<seed>/runs.csv`` last, so an interrupted sweep resumes where it stopped.
-"""
 from __future__ import annotations
 
 import os
@@ -42,7 +33,6 @@ def run_unit(cfg: Config, arch: str, size: int, seed: int, device: torch.device)
     data = load_task_data(spec.dataset, cfg.data_dir, cfg.train_frac, cfg.data_seed)
     width = width_for_target(arch, size)
 
-    # Verifying scientist phase (Alg. 1): reference model M0 on the first train_frac of the data.
     ver = train_run(arch, width, *data.verifier, cfg.training, derive_seed("verifier", arch, size, seed), device)
     with Timer(device) as tj:
         judge = train_judge(ver.snapshots, cfg.judge, cfg.validate.rho, device,
@@ -55,7 +45,6 @@ def run_unit(cfg: Config, arch: str, size: int, seed: int, device: torch.device)
                 tau=judge.tau, eta_v=judge.eta_v, gamma=judge.gamma)
     rows, snaps = [], {"verifier": ver.snapshots}
 
-    # Scientist phase + verification phase (Alg. 2): every scientist trains on the full dataset.
     def scientist(role: str, flip: float, idx: int, run_seed: int) -> None:
         r = train_run(arch, width, *data.scientist, cfg.training, run_seed, device, flip)
         v = validate(judge, r.snapshots, cfg.validate.theta)
@@ -81,7 +70,7 @@ def run_unit(cfg: Config, arch: str, size: int, seed: int, device: torch.device)
                                        unit_seconds=time.perf_counter() - t0, **judge.diagnostics))
     tmp = out / "runs.csv.tmp"
     df.to_csv(tmp, index=False)
-    tmp.replace(out / "runs.csv")  # completion marker
+    tmp.replace(out / "runs.csv")
 
     h, m = df[df.role == "honest"], df[df.role == "malicious"]
     return (f"{tag} done in {time.perf_counter() - t0:.0f}s | honest rejected {(~h.accept).sum()}/{len(h)} | "
@@ -106,7 +95,6 @@ def collect_runs(out: Path) -> pd.DataFrame:
     if not files:
         raise FileNotFoundError(f"no finished units under {out / 'units'}")
     df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
-    # Several per-architecture jobs may finish at once: write via a private temp file, then rename.
     tmp = Path(out) / f"runs.csv.{os.getpid()}.tmp"
     df.to_csv(tmp, index=False)
     os.replace(tmp, Path(out) / "runs.csv")
