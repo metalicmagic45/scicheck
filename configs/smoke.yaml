@@ -1,0 +1,26 @@
+# Minutes-long end-to-end check of the whole pipeline on real data (not for results).
+name: smoke
+out_dir: results/smoke
+data_dir: data
+device: auto
+
+architectures: [mlp, cnn, ae]
+sizes: [4000, 12000]
+severities: [0.1, 0.5]
+seeds: [0]
+n_honest: 2
+n_malicious: 2
+train_frac: 0.3
+save_snapshots: true
+
+training:
+  epochs: 5                  # CNN verifier: 15 batches x 5 = 75 snapshots, enough for W=10 splits
+
+judge:
+  window: 10
+  epochs: 2
+  patience: 1
+
+performance:
+  n_honest: 1
+  n_malicious: 1
