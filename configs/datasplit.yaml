@@ -1,0 +1,5 @@
+base: paper.yaml
+name: datasplit
+out_dir: results/datasplit
+sizes: [300000]
+train_frac: 1.0

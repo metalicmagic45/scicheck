@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,18 @@ from .experiments.accuracy import collect_runs
 
 ARCH_LABEL = {"mlp": "MLP", "cnn": "CNN", "ae": "AE"}
 SEVERITY_COLORS = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"]
+ATTACK_COLORS = {"signflip": "#2a78d6", "data": "#d97a1f", "fabricate": "#3a9a5b"}
+ATTACK_LABEL = {"signflip": "Sign flip", "data": "Unauthorized data", "fabricate": "Fabricated run"}
+PHI_COL = {"at": "phi", "iforest": "phi_iforest", "ocsvm": "phi_ocsvm"}
+CHECKS = {
+    "at+eta": "SciCheck (AT + η)",
+    "at": "AT only",
+    "eta": "η only",
+    "iforest": "Isolation Forest",
+    "iforest+eta": "Isolation Forest + η",
+    "ocsvm": "One-Class SVM",
+    "ocsvm+eta": "One-Class SVM + η",
+}
 SEQ_RAMP = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
 INK, INK_MUTED, GRID = "#1f1f1e", "#5f5f5c", "#e4e3df"
 THETA_GRID = [0.05, 0.1, 0.2, 0.3, 0.4, 0.5]
@@ -20,18 +33,25 @@ def size_label(n: int) -> str:
     return f"{n // 1000}k" if n % 1000 == 0 else str(n)
 
 
-def decide(df: pd.DataFrame, theta: float, rho: float, variant: str = "both") -> pd.Series:
-    at_pass = df.phi <= theta
+def decide(df: pd.DataFrame, theta: float, rho: float, variant: str = "at+eta") -> pd.Series:
+    detector, _, with_eta = variant.partition("+")
     eta_pass = df.eta_s >= rho * df.eta_v
-    return {"both": at_pass & eta_pass, "at": at_pass, "eta": eta_pass}[variant]
+    if detector == "eta":
+        return eta_pass
+    passed = df[PHI_COL[detector]] <= theta
+    return passed & eta_pass if with_eta else passed
 
 
 def expand_cells(df: pd.DataFrame) -> pd.DataFrame:
-    severities = sorted(df.loc[df.role == "malicious", "flip"].unique())
-    honest = df[df.role == "honest"]
-    parts = [df[df.role == "malicious"].assign(cell_flip=df.flip)]
-    parts += [honest.assign(cell_flip=f) for f in severities]
+    mal, honest = df[df.role == "malicious"], df[df.role == "honest"]
+    parts = [mal.assign(cell_attack=mal.attack, cell_sev=mal.severity)]
+    parts += [honest.assign(cell_attack=a, cell_sev=s)
+              for a, s in mal[["attack", "severity"]].drop_duplicates().itertuples(index=False)]
     return pd.concat(parts, ignore_index=True)
+
+
+def _attack_order(cells: pd.DataFrame) -> list[str]:
+    return list(dict.fromkeys(cells.cell_attack))
 
 
 def counts(g: pd.DataFrame, accept: str = "accept") -> pd.Series:
@@ -54,7 +74,7 @@ def rates(c: pd.Series) -> pd.Series:
 
 
 def cell_prf(cells: pd.DataFrame, accept: str = "accept") -> pd.DataFrame:
-    keys = ["arch", "target_size", "cell_flip", "seed"]
+    keys = ["arch", "target_size", "cell_attack", "cell_sev", "seed"]
     return cells.groupby(keys).apply(lambda g: prf(counts(g, accept)), include_groups=False).reset_index()
 
 
@@ -63,47 +83,41 @@ def _arch_blocks(fn, archs) -> pd.DataFrame:
     return pd.concat(blocks, axis=1)
 
 
+def _breakdown(d: pd.DataFrame, stat) -> pd.DataFrame:
+    order = _attack_order(d)
+    by_size = d.groupby("target_size").apply(stat, include_groups=False)
+    by_size.index = [f"size {size_label(s)}" for s in by_size.index]
+    by_attack = d.groupby("cell_attack").apply(stat, include_groups=False).reindex(order)
+    by_attack.index = [ATTACK_LABEL.get(a, a) for a in by_attack.index]
+    by_sev = d.groupby(["cell_attack", "cell_sev"]).apply(stat, include_groups=False)
+    by_sev = by_sev.reindex([i for a in order for i in by_sev.index if i[0] == a])
+    by_sev.index = [f"{ATTACK_LABEL.get(a, a)} {s:g}" for a, s in by_sev.index]
+    overall = stat(d).to_frame("Overall Avg").T
+    return pd.concat([by_size, by_attack, by_sev, overall])
+
+
 def table_iv(cells: pd.DataFrame, archs) -> pd.DataFrame:
     per_cell = cell_prf(cells)
-
-    def block(a):
-        d = per_cell[per_cell.arch == a]
-        by_size = d.groupby("target_size")[["P", "R", "F1"]].mean()
-        by_size.index = [f"size {size_label(s)}" for s in by_size.index]
-        by_sev = d.groupby("cell_flip")[["P", "R", "F1"]].mean()
-        by_sev.index = [f"flip {f:g}" for f in by_sev.index]
-        overall = d[["P", "R", "F1"]].mean().to_frame("Overall Avg").T
-        return pd.concat([by_size, by_sev, overall])
-
-    return _arch_blocks(block, archs)
+    mean_prf = lambda g: g[["P", "R", "F1"]].mean()
+    return _arch_blocks(lambda a: _breakdown(per_cell[per_cell.arch == a], mean_prf), archs)
 
 
 def table_v(cells: pd.DataFrame, archs) -> pd.DataFrame:
-    def block(a):
-        d = cells[cells.arch == a]
-        by_size = d.groupby("target_size").apply(lambda g: rates(counts(g)), include_groups=False)
-        by_size.index = [f"size {size_label(s)}" for s in by_size.index]
-        by_sev = d.groupby("cell_flip").apply(lambda g: rates(counts(g)), include_groups=False)
-        by_sev.index = [f"flip {f:g}" for f in by_sev.index]
-        overall = rates(counts(d)).to_frame("Overall Avg").T
-        return pd.concat([by_size, by_sev, overall])
-
-    return _arch_blocks(block, archs)
+    return _arch_blocks(lambda a: _breakdown(cells[cells.arch == a], lambda g: rates(counts(g))), archs)
 
 
-def ablation(cells: pd.DataFrame, theta: float, rho: float, archs) -> pd.DataFrame:
+def comparison(cells: pd.DataFrame, theta: float, rho: float, archs) -> pd.DataFrame:
     rows = []
-    names = {"at": "AT only (ϕ ≤ θ)", "eta": "Effective signal only (η̄s ≥ γ)", "both": "Both (SciCheck)"}
+    checks = [v for v in CHECKS if v.partition("+")[0] == "eta" or PHI_COL[v.partition("+")[0]] in cells]
     for a in archs:
         d = cells[cells.arch == a].copy()
-        for v, name in names.items():
+        for v in checks:
             d["_acc"] = decide(d, theta, rho, v)
-            c = counts(d, "_acc")
-            f1 = cell_prf(d, "_acc").F1.mean()
-            low = d[d.cell_flip == d.cell_flip.min()]
-            rows.append({"arch": ARCH_LABEL.get(a, a), "check": name, **rates(c).to_dict(),
-                         f"FalseNegative @ flip {low.cell_flip.min():g}": rates(counts(low, "_acc")).FalseNegative,
-                         "mean F1": f1})
+            row = {"arch": ARCH_LABEL.get(a, a), "check": CHECKS[v], **rates(counts(d, "_acc")).to_dict()}
+            for atk, g in d[d.role == "malicious"].groupby("cell_attack", sort=False):
+                row[f"FalseNegative {ATTACK_LABEL.get(atk, atk)}"] = rates(counts(g, "_acc")).FalseNegative
+            row["mean F1"] = cell_prf(d, "_acc").F1.mean()
+            rows.append(row)
     return pd.DataFrame(rows).set_index(["arch", "check"])
 
 
@@ -135,6 +149,27 @@ def table_vi(out: Path, archs) -> pd.DataFrame | None:
     return t
 
 
+def load_histories(out: Path) -> pd.DataFrame | None:
+    frames = []
+    for f in sorted((out / "units").glob("*/history.csv")):
+        meta = json.loads((f.parent / "meta.json").read_text())
+        h = pd.read_csv(f)
+        frames.append(h[h.role.isin(["verifier", "honest"])].assign(arch=meta["arch"],
+                                                                       target_size=meta["target_size"]))
+    return pd.concat(frames, ignore_index=True) if frames else None
+
+
+def overfitting(hist: pd.DataFrame, archs) -> pd.DataFrame:
+    last = hist[hist.epoch == hist.groupby(["arch", "target_size", "role"]).epoch.transform("max")]
+    cols = ["train_loss", "eval_loss"] + (["eval_acc"] if "eval_acc" in last else [])
+    t = last.groupby(["arch", "target_size", "role"])[cols].mean()
+    t.insert(2, "gap", t.eval_loss - t.train_loss)
+    t = t.rename(columns={"train_loss": "train loss", "eval_loss": "held-out loss", "eval_acc": "held-out acc"})
+    t = t.reindex([i for a in archs for i in t.index if i[0] == a])
+    t.index = [(ARCH_LABEL.get(a, a), size_label(s), r) for a, s, r in t.index]
+    return t
+
+
 def _style(ax):
     ax.spines[["top", "right"]].set_visible(False)
     ax.spines[["left", "bottom"]].set_color(INK_MUTED)
@@ -151,16 +186,15 @@ def figure_2(cells: pd.DataFrame, archs, path: Path) -> None:
 
     per_cell = cell_prf(cells)
     sizes = sorted(per_cell.target_size.unique())
-    flips = sorted(per_cell.cell_flip.unique())
     fig, axes = plt.subplots(1, len(archs), figsize=(3.4 * len(archs), 2.8), sharey=True)
     axes = np.atleast_1d(axes)
     for ax, a in zip(axes, archs):
         d = per_cell[per_cell.arch == a]
         x = np.arange(len(sizes))
-        for i, f in enumerate(flips):
-            y = d[d.cell_flip == f].groupby("target_size").F1.mean().reindex(sizes)
-            ax.plot(x, y, color=SEVERITY_COLORS[i % len(SEVERITY_COLORS)], lw=2, marker="o", ms=4,
-                    label=f"flip {f:g}")
+        for atk in _attack_order(cells):
+            y = d[d.cell_attack == atk].groupby("target_size").F1.mean().reindex(sizes)
+            ax.plot(x, y, color=ATTACK_COLORS.get(atk, INK_MUTED), lw=2, marker="o", ms=4,
+                    label=ATTACK_LABEL.get(atk, atk))
         avg = d.groupby("target_size").F1.mean().reindex(sizes)
         ax.plot(x, avg, color=INK, lw=2, ls="--", marker="*", ms=8, label="average")
         ax.set_xticks(x, [size_label(s) for s in sizes])
@@ -169,8 +203,9 @@ def figure_2(cells: pd.DataFrame, archs, path: Path) -> None:
         ax.set_xlabel("Model size", fontsize=9, color=INK_MUTED)
         _style(ax)
     axes[0].set_ylabel("F1", fontsize=9, color=INK_MUTED)
-    axes[0].legend(fontsize=7, frameon=False, loc="lower left", ncol=2)
-    fig.tight_layout()
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, fontsize=8, frameon=False, loc="lower center", ncol=len(labels))
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
     fig.savefig(path, dpi=200)
     fig.savefig(path.with_suffix(".pdf"))
     plt.close(fig)
@@ -211,6 +246,33 @@ def figure_sensitivity(sens: pd.DataFrame, archs, theta: float, rho: float, path
     plt.close(fig)
 
 
+def figure_gap(hist: pd.DataFrame, archs, path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    h = hist[hist.role == "honest"]
+    archs = [a for a in archs if a in set(h.arch)]
+    sizes = sorted(h.target_size.unique())
+    fig, axes = plt.subplots(1, len(archs), figsize=(3.4 * len(archs), 2.8), squeeze=False)
+    for ax, a in zip(axes[0], archs):
+        d = h[h.arch == a]
+        for i, s in enumerate(sizes):
+            g = d[d.target_size == s].groupby("epoch")[["train_loss", "eval_loss"]].mean()
+            ax.plot(g.index, g.eval_loss - g.train_loss, color=SEVERITY_COLORS[i % len(SEVERITY_COLORS)],
+                    lw=2, label=size_label(s))
+        ax.axhline(0, color=INK_MUTED, lw=0.8)
+        ax.set_title(ARCH_LABEL.get(a, a), fontsize=10, color=INK)
+        ax.set_xlabel("Epoch", fontsize=9, color=INK_MUTED)
+        _style(ax)
+    axes[0, 0].set_ylabel("Held-out minus train loss", fontsize=9, color=INK_MUTED)
+    axes[0, 0].legend(fontsize=7, frameon=False, loc="upper left")
+    fig.tight_layout()
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+
+
 def to_markdown(df: pd.DataFrame, fmt: str = "{:.3f}") -> str:
     cols = [" ".join(str(x) for x in c) if isinstance(c, tuple) else str(c) for c in df.columns]
     idx = [" / ".join(str(x) for x in i) if isinstance(i, tuple) else str(i) for i in df.index]
@@ -238,22 +300,35 @@ def build_report(cfg: Config) -> Path:
         cells = expand_cells(runs)
         n_units = runs.groupby(["arch", "target_size", "seed"]).ngroups
         md += [f"{len(runs)} trained scientist runs from {n_units} units; "
-               f"{len(cells)} scored runs after giving each severity cell its honest runs.", ""]
+               f"{len(cells)} scored runs after giving each (attack, severity) cell its honest runs.", ""]
         t4, t5 = table_iv(cells, archs), table_v(cells, archs)
-        abl, sens = ablation(cells, theta, rho, archs), sensitivity(cells, archs)
+        comp, sens = comparison(cells, theta, rho, archs), sensitivity(cells, archs)
         t4.to_csv(rep / "table_iv_prf.csv")
         t5.to_csv(rep / "table_v_fp_fn.csv")
-        abl.to_csv(rep / "ablation.csv")
+        comp.to_csv(rep / "baselines_ablation.csv")
         sens.to_csv(rep / "sensitivity_theta_rho.csv", index=False)
         figure_2(cells, archs, rep / "fig2_f1_by_size.png")
         figure_sensitivity(sens, archs, theta, rho, rep / "sensitivity_theta_rho.png")
         md += ["## Table IV - precision / recall / F1", "", to_markdown(t4), "",
                "## Table V - FalsePositive / FalseNegative (pooled counts)", "", to_markdown(t5), "",
-               "## Figure 2 - F1 by model size", "", "![fig2](fig2_f1_by_size.png)", "",
-               "## Ablation - which conjunct does the work (pooled over all cells)", "", to_markdown(abl), "",
+               "## Figure 2 - F1 by model size and attack", "", "![fig2](fig2_f1_by_size.png)", "",
+               "## Baselines and ablation (pooled over all cells)", "",
+               "Every check uses the same verifier snapshots, τ at the (1 - r)-quantile of its validation "
+               "scores, and ϕ ≤ θ. Isolation Forest and One-Class SVM score each snapshot on its own.", "",
+               to_markdown(comp), "",
                "## Sensitivity of FalsePositive / FalseNegative to (θ, ρ)", "",
                "Full grid in `sensitivity_theta_rho.csv`; the paper's operating point is outlined.", "",
                "![sensitivity](sensitivity_theta_rho.png)", ""]
+
+    hist = load_histories(out)
+    if hist is not None:
+        ov = overfitting(hist, cfg.architectures)
+        ov.to_csv(rep / "overfitting.csv")
+        figure_gap(hist, cfg.architectures, rep / "overfitting_gap.png")
+        md += ["## Overfitting - final-epoch train vs held-out loss", "",
+               f"Held-out set: {cfg.data.test_frac:.0%} of each dataset, never trained on. Honest runs and the "
+               "verifier only. A gap that grows over epochs means the model is memorizing.", "",
+               to_markdown(ov, "{:.4f}"), "", "![gap](overfitting_gap.png)", ""]
 
     t6 = table_vi(out, cfg.architectures)
     if t6 is not None:

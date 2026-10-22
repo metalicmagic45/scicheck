@@ -3,12 +3,14 @@ import pytest
 import torch
 
 from scicheck.anomaly_transformer import AnomalyTransformer, anomaly_scores
-from scicheck.attacks import SignFlipAttack
-from scicheck.config import JudgeConfig, TrainingConfig, load_config
+from scicheck.attacks import SignFlipAttack, fabricate_tail, poison_data
+from scicheck.baselines import fit_baselines
+from scicheck.config import DataConfig, JudgeConfig, TrainingConfig, load_config
+from scicheck.data import HIGGS_FEATURES, TaskData, load_task_data
 from scicheck.judge import sliding_windows, train_judge, validate, windows_to_timeline
 from scicheck.models import ARCHS, build_for_target, count_params, tracked_layers
 from scicheck.snapshots import ETA_COL, SnapshotRecorder, feature_names
-from scicheck.training import train_run
+from scicheck.training import augment_images, train_run
 
 SIZES = [4000, 6000, 8000, 10000, 12000]
 
@@ -16,6 +18,12 @@ SIZES = [4000, 6000, 8000, 10000, 12000]
 def test_param_counts_match_paper_range():
     counts = [count_params(build_for_target(a, s)[0]) for a in ARCHS for s in SIZES]
     assert min(counts) == 3922 and max(counts) == 12051
+
+
+def test_param_counts_hit_large_targets():
+    for a in ARCHS:
+        for s in (100_000, 300_000, 500_000):
+            assert count_params(build_for_target(a, s)[0]) == pytest.approx(s, rel=0.01)
 
 
 @pytest.mark.parametrize("arch,dim", [("mlp", 16), ("cnn", 16), ("ae", 15)])
@@ -101,7 +109,7 @@ def test_anomaly_transformer_shapes():
 
 def test_end_to_end_on_synthetic_data():
     rng = np.random.default_rng(0)
-    X = rng.normal(size=(400, 8)).astype(np.float32)
+    X = rng.normal(size=(400, HIGGS_FEATURES)).astype(np.float32)
     y = (X[:, 0] + 0.5 * X[:, 1] > 0).astype(np.float32)
     dev = torch.device("cpu")
     tcfg = TrainingConfig(epochs=10, batch_size=32)
@@ -109,7 +117,7 @@ def test_end_to_end_on_synthetic_data():
     jcfg = JudgeConfig(window=8, epochs=2, patience=1)
     judge = train_judge(ver.snapshots, jcfg, rho=0.4, device=dev, seed=0)
     honest = train_run("mlp", 10, X, y, tcfg, seed=2, device=dev)
-    bad = train_run("mlp", 10, X, y, tcfg, seed=3, device=dev, flip=0.5)
+    bad = train_run("mlp", 10, X, y, tcfg, seed=3, device=dev, attack="signflip", severity=0.5)
     for run in (honest, bad):
         v = validate(judge, run.snapshots, 0.3)
         assert 0 <= v.phi <= 1 and v.eta_s > 0
@@ -120,5 +128,101 @@ def test_end_to_end_on_synthetic_data():
 
 
 def test_configs_load():
-    for path in ("configs/paper.yaml", "configs/smoke.yaml"):
+    for path in ("configs/paper.yaml", "configs/smoke.yaml", "configs/datasplit.yaml"):
         load_config(path)
+
+
+def test_datasplit_inherits_paper_design():
+    paper, split = load_config("configs/paper.yaml"), load_config("configs/datasplit.yaml")
+    assert split.train_frac == 1.0 and split.sizes == [300000] and split.out_dir == "results/datasplit"
+    assert split.training == paper.training and split.data == paper.data and split.judge == paper.judge
+    assert (split.attacks, split.severities, split.n_honest) == (paper.attacks, paper.severities, paper.n_honest)
+
+
+def test_task_data_splits_are_disjoint_and_nested():
+    X = np.arange(100, dtype=np.float32)[:, None]
+    d = TaskData(X=X, y=X[:, 0], n_train=85, n_verifier=26)
+    sci, ver, test = d.scientist[0][:, 0], d.verifier[0][:, 0], d.test[0][:, 0]
+    assert len(sci) == 85 and len(ver) == 26 and len(test) == 15
+    assert set(ver) <= set(sci) and not set(test) & set(sci)
+
+
+def test_load_task_data_holds_out_test_frac(tmp_path):
+    rng = np.random.default_rng(0)
+    rows = np.column_stack([rng.integers(0, 2, 200), rng.normal(size=(200, HIGGS_FEATURES))])
+    (tmp_path / "raw").mkdir()
+    np.savetxt(tmp_path / "raw" / "HIGGS.csv", rows, delimiter=",", fmt="%.6f")
+    d = load_task_data("higgs", tmp_path, train_frac=0.3, dcfg=DataConfig(higgs_rows=200, test_frac=0.15))
+    assert d.X.shape == (200, HIGGS_FEATURES) and d.n_train == 170 and d.n_verifier == 51
+    assert set(np.unique(d.y)) <= {0.0, 1.0}
+
+
+def test_augment_images_flips_and_shifts_per_image():
+    x = torch.arange(2 * 3 * 8 * 8, dtype=torch.float32).reshape(2, 3, 8, 8)
+    out = augment_images(x, torch.Generator().manual_seed(0))
+    assert out.shape == x.shape
+    again = augment_images(x, torch.Generator().manual_seed(0))
+    assert torch.equal(out, again)
+    outs = [augment_images(x, torch.Generator().manual_seed(s)) for s in range(10)]
+    assert any(not torch.equal(o, x) for o in outs)
+
+
+def test_train_run_logs_held_out_loss_per_epoch():
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(300, HIGGS_FEATURES)).astype(np.float32)
+    y = (X[:, 0] > 0).astype(np.float32)
+    r = train_run("mlp", 8, X[:200], y[:200], TrainingConfig(epochs=3), seed=0, device=torch.device("cpu"),
+                  eval_data=(X[200:], y[200:]))
+    assert [h["epoch"] for h in r.history] == [1, 2, 3]
+    assert all(np.isfinite(h["eval_loss"]) and 0 <= h["eval_acc"] <= 1 for h in r.history)
+    plain = train_run("mlp", 8, X[:200], y[:200], TrainingConfig(epochs=3), seed=0, device=torch.device("cpu"))
+    np.testing.assert_array_equal(r.snapshots, plain.snapshots)
+
+
+def test_poison_data_flips_labels_or_inverts_images():
+    X = np.zeros((100, 4), dtype=np.float32)
+    y = np.zeros(100, dtype=np.float32)
+    Xp, yp = poison_data(X, y, "binary", 0.3, seed=0)
+    assert yp.sum() == 30 and np.array_equal(Xp, X) and y.sum() == 0
+    Xa, ya = poison_data(X, X, "reconstruction", 0.2, seed=0)
+    assert (Xa.max(1) == 1).sum() == 20 and ya is Xa and X.sum() == 0
+
+
+def test_fabricate_tail_replays_last_epoch():
+    S = np.arange(12, dtype=np.float32)[:, None]
+    out = fabricate_tail(S, n_total=20, steps_per_epoch=4)
+    assert out.shape == (20, 1)
+    np.testing.assert_array_equal(out[:12, 0], np.arange(12))
+    np.testing.assert_array_equal(out[12:, 0], [8, 9, 10, 11, 8, 9, 10, 11])
+
+
+def test_attacked_runs_keep_full_length():
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(320, HIGGS_FEATURES)).astype(np.float32)
+    y = (X[:, 0] > 0).astype(np.float32)
+    tcfg, dev = TrainingConfig(epochs=4, batch_size=32), torch.device("cpu")
+    honest = train_run("mlp", 8, X, y, tcfg, seed=0, device=dev)
+    fake = train_run("mlp", 8, X, y, tcfg, seed=0, device=dev, attack="fabricate", severity=0.5)
+    data = train_run("mlp", 8, X, y, tcfg, seed=0, device=dev, attack="data", severity=0.3)
+    assert len(honest.snapshots) == len(fake.snapshots) == len(data.snapshots) == 40
+    np.testing.assert_allclose(fake.snapshots[:20], honest.snapshots[:20], rtol=1e-5, atol=1e-7)
+    np.testing.assert_array_equal(fake.snapshots[20:30], fake.snapshots[10:20])
+    with pytest.raises(ValueError):
+        train_run("mlp", 8, X, y, tcfg, seed=0, device=dev, attack="fabricate", severity=0.9)
+
+
+def test_baselines_flag_shifted_runs_more():
+    rng = np.random.default_rng(0)
+    T = rng.normal(size=(600, 16)).astype(np.float32)
+    jcfg = JudgeConfig(window=8, epochs=1, patience=1)
+    judge = train_judge(T, jcfg, rho=0.4, device=torch.device("cpu"), seed=0)
+    bs = fit_baselines(T, judge, jcfg, seed=0)
+    assert set(bs) == {"iforest", "ocsvm"}
+    same = rng.normal(size=(300, 16)).astype(np.float32)
+    shifted = same + 4.0
+    for b in bs.values():
+        assert b.phi(judge, same) < 0.1 and b.phi(judge, shifted) > 0.9
+    broken = same.copy()
+    broken[:30] = np.nan
+    for b in bs.values():
+        assert b.phi(judge, broken) >= 0.1

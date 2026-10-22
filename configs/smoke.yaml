@@ -5,6 +5,7 @@ device: auto
 
 architectures: [mlp, cnn, ae]
 sizes: [4000, 12000]
+attacks: [signflip, data, fabricate]
 severities: [0.1, 0.5]
 seeds: [0]
 n_honest: 2
@@ -12,8 +13,15 @@ n_malicious: 2
 train_frac: 0.3
 save_snapshots: true
 
+data:
+  higgs_rows: 4000
+  petimages: 2000
+  mnist: 2000
+
 training:
   epochs: 5
+  batch_size: 32
+  augment: true
 
 judge:
   window: 10

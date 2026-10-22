@@ -13,9 +13,9 @@ pip install -r requirements.txt
 python -m scicheck download
 ```
 
-`download` puts MNIST, PetImages and the placement CSV in `data/`. If Kaggle asks for credentials,
-download the CSV from https://www.kaggle.com/datasets/sahilislam007/college-student-placement-factors-dataset
-and save it as `data/raw/placement.csv`.
+`download` puts MNIST, PetImages and HIGGS in `data/`. HIGGS comes from UCI as a 2.6 GB zip
+(https://archive.ics.uci.edu/static/public/280/higgs.zip); only the first `data.higgs_rows` rows are
+read and cached. If you already have `HIGGS.csv.gz` or `HIGGS.csv`, put it in `data/raw/` instead.
 
 ## Run
 
@@ -27,35 +27,67 @@ python -m scicheck accuracy --config configs/smoke.yaml
 python -m scicheck report   --config configs/smoke.yaml
 ```
 
-Full experiments:
+Full experiments on a SLURM cluster (run `download` first so the jobs find the cached data):
 
 ```bash
-python -m scicheck accuracy    --config configs/paper.yaml --workers 8 --devices cuda:0
+mkdir -p logs                     # SLURM writes job output here and won't create the folder
+sbatch jobs/accuracy.sbatch       # main experiment, one GPU job per architecture
+sbatch jobs/datasplit.sbatch      # data-split control, writes its own report
+sbatch jobs/performance.sbatch    # runtime sweep (GPU)
+sbatch jobs/memory.sbatch         # memory sweep (CPU only, the longest job)
+```
+
+When they have all finished, build the main report:
+
+```bash
+python -m scicheck report
+```
+
+On a single machine without SLURM, `jobs/run_all.sh` runs the same steps in order. Each step can
+also be run by hand:
+
+```bash
+python -m scicheck accuracy    --config configs/paper.yaml --workers 4 --devices cuda:0
 python -m scicheck performance --config configs/paper.yaml
+python -m scicheck accuracy    --config configs/datasplit.yaml --workers 4 --devices cuda:0
+python -m scicheck report      --config configs/datasplit.yaml
 python -m scicheck report      --config configs/paper.yaml
 ```
 
-`configs/paper.yaml` currently runs 100k-500k parameter models with 1 seed and 5 honest + 5 malicious
-runs. The paper used 4k-12k, 5 seeds and 10 + 10. `jobs/` has SLURM and plain shell versions of
-these steps. If `accuracy` is stopped, rerun the same command and it continues where it left off.
+`configs/paper.yaml` runs 100k-500k parameter models (batch size 128, 1 seed) against three attacks
+(sign flip, unauthorized data, fabricated run) at severities 0.1/0.3/0.5, with 10 honest runs per
+judge and 5 malicious runs per (attack, severity) cell. The datasets are large enough for that
+size: HIGGS (200k rows) for the MLP, all of PetImages (~25k images, flip/crop augmentation) for the
+CNN, and all 60k MNIST digits for the AE, each with 15% held out from both parties to measure
+overfitting. [HOW_IT_WORKS.md](HOW_IT_WORKS.md) has the run and seed counts. The original paper used
+4k-12k parameters, sign flip only, 5 seeds, 10 + 10 runs per cell, the 10k-row placement table,
+1,500 PetImages and 3,000 MNIST digits.
+
+`configs/datasplit.yaml` is the data-split control: the same design at 300k only, with the verifier
+trained on all of the scientist's training data (`train_frac: 1.0`) instead of 30%. It writes to
+`results/datasplit/`. Every job resumes where it stopped: if one hits its time limit, submit it
+again.
 
 ## Output
 
-`accuracy` prints one line per finished (architecture, size, seed), for example:
+`accuracy` prints one line per finished (architecture, size, seed) in this format (the numbers are
+made up):
 
 ```
-(3/15) [mlp 100000 s0 cuda:0] done in 812s | honest rejected 1/5 | malicious rejected 25/25
+(3/15) [mlp 100000 s0 cuda:0] done in 2400s | honest rejected 1/10 | malicious rejected signflip 14/15, data 9/15, fabricate 12/15
 ```
 
 Everything is written to the config's `out_dir` (e.g. `results/paper/`):
 
 | path | contents |
 |---|---|
-| `runs.csv` | one row per scientist run: role, flip, phi, eta_s, both check results, accept |
-| `units/<arch>_<size>_s<seed>/` | that unit's runs, judge (`judge.pt`), snapshots, training diagnostics |
+| `runs.csv` | one row per scientist run: role, attack, severity, phi, eta_s, both check results, accept, the baselines' phi_iforest / phi_ocsvm, final held-out loss |
+| `units/<arch>_<size>_s<seed>/` | that unit's runs, judge (`judge.pt`), snapshots, training diagnostics (`meta.json`) |
+| `units/.../history.csv` | train and held-out loss (and accuracy) after every epoch of every run |
 | `performance/` | runtime and peak memory per (arch, size) |
-| `report/report.md` | Tables IV-VI, Figure 2, ablation, θ/ρ sensitivity, plus CSV/PNG of each |
+| `report/report.md` | Tables IV-VI, Figure 2, baselines vs ablation, θ/ρ sensitivity, overfitting table and gap plot, plus CSV/PNG of each |
 
-What to expect (from the paper's 4k-12k runs): MLP and CNN reject nearly all malicious runs at flip ≥ 0.3, and miss many at
-flip 0.1. The autoencoder rejects most honest runs as well. The smoke config is too small for
-meaningful numbers; it only checks that everything runs end to end.
+For reference, the original paper's 4k-12k sign-flip runs: the MLP and CNN rejected nearly all
+malicious runs at flip ≥ 0.3 and missed many at 0.1, and the autoencoder rejected most honest runs as
+well. The other two attacks and the baselines have no earlier results. The smoke config is too small
+for meaningful numbers; it only checks that everything runs end to end.

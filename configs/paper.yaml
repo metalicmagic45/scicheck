@@ -6,18 +6,26 @@ deterministic: false
 
 architectures: [mlp, cnn, ae]
 sizes: [100000, 200000, 300000, 400000, 500000]
-severities: [0.1, 0.2, 0.3, 0.4, 0.5]
+attacks: [signflip, data, fabricate]
+severities: [0.1, 0.3, 0.5]
 seeds: [0]
-n_honest: 5
+n_honest: 10
 n_malicious: 5
 train_frac: 0.3
 data_seed: 0
 save_snapshots: true
 
+data:
+  higgs_rows: 200000
+  petimages: 0
+  mnist: 0
+  test_frac: 0.15
+
 training:
   epochs: 25
-  batch_size: 32
+  batch_size: 128
   lr: 0.001
+  augment: true
 
 judge:
   window: 30
@@ -36,6 +44,7 @@ judge:
   r: 0.01
   eta_baseline: train
   score_batch_size: 1024
+  baselines: [iforest, ocsvm]
 
 validate:
   theta: 0.3

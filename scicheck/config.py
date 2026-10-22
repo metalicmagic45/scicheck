@@ -9,8 +9,17 @@ import yaml
 @dataclass
 class TrainingConfig:
     epochs: int = 25
-    batch_size: int = 32
+    batch_size: int = 128
     lr: float = 1e-3
+    augment: bool = True
+
+
+@dataclass
+class DataConfig:
+    higgs_rows: int = 200_000
+    petimages: int = 0
+    mnist: int = 0
+    test_frac: float = 0.15
 
 
 @dataclass
@@ -31,6 +40,7 @@ class JudgeConfig:
     r: float = 0.01
     eta_baseline: str = "train"
     score_batch_size: int = 1024
+    baselines: tuple[str, ...] = ("iforest", "ocsvm")
 
 
 @dataclass
@@ -41,8 +51,8 @@ class ValidateConfig:
 
 @dataclass
 class PerformanceConfig:
-    n_honest: int = 10
-    n_malicious: int = 10
+    n_honest: int = 5
+    n_malicious: int = 5
     severity: float = 0.3
     sweeps: tuple[str, ...] = ("runtime", "memory")
 
@@ -55,14 +65,16 @@ class Config:
     device: str = "auto"
     deterministic: bool = False
     architectures: list[str] = field(default_factory=lambda: ["mlp", "cnn", "ae"])
-    sizes: list[int] = field(default_factory=lambda: [4000, 6000, 8000, 10000, 12000])
-    severities: list[float] = field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5])
-    seeds: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
+    sizes: list[int] = field(default_factory=lambda: [100_000, 200_000, 300_000, 400_000, 500_000])
+    attacks: list[str] = field(default_factory=lambda: ["signflip", "data", "fabricate"])
+    severities: list[float] = field(default_factory=lambda: [0.1, 0.3, 0.5])
+    seeds: list[int] = field(default_factory=lambda: [0])
     n_honest: int = 10
-    n_malicious: int = 10
+    n_malicious: int = 5
     train_frac: float = 0.3
     data_seed: int = 0
     save_snapshots: bool = True
+    data: DataConfig = field(default_factory=DataConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     validate: ValidateConfig = field(default_factory=ValidateConfig)
@@ -77,6 +89,7 @@ class Config:
 
 
 _SECTIONS = {
+    "data": DataConfig,
     "training": TrainingConfig,
     "judge": JudgeConfig,
     "validate": ValidateConfig,
@@ -93,16 +106,28 @@ def _build(cls, values: dict, where: str):
     for k, v in values.items():
         if k in _SECTIONS and cls is Config:
             v = _build(_SECTIONS[k], v or {}, f"{where}.{k}")
-        elif isinstance(v, list) and k in ("split", "sweeps"):
+        elif isinstance(v, list) and k in ("split", "sweeps", "baselines"):
             v = tuple(v)
         kwargs[k] = v
     return cls(**kwargs)
 
 
-def load_config(path: str | Path) -> Config:
+def _merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def _load_raw(path: Path) -> dict:
     with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
-    return _build(Config, raw, str(path))
+    base = raw.pop("base", None)
+    return _merge(_load_raw(path.parent / base), raw) if base else raw
+
+
+def load_config(path: str | Path) -> Config:
+    return _build(Config, _load_raw(Path(path)), str(path))
 
 
 def config_from_dict(d: dict) -> Config:

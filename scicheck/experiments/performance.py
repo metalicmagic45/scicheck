@@ -42,13 +42,14 @@ def _append(csv: Path, row: dict) -> None:
 
 
 def runtime_cell(cfg: Config, arch: str, size: int, seed: int, device: torch.device) -> dict:
-    data = load_task_data(ARCHS[arch].dataset, cfg.data_dir, cfg.train_frac, cfg.data_seed)
+    data = load_task_data(ARCHS[arch].dataset, cfg.data_dir, cfg.train_frac, cfg.data_seed, cfg.data)
     width = width_for_target(arch, size)
     ver = train_run(arch, width, *data.verifier, cfg.training,
                     derive_seed("perf-verifier", arch, size, seed), device)
     sci_seconds, submissions = 0.0, []
     for _role, flip, _i, run_seed in _scientist_jobs(cfg, arch, size, seed):
-        r = train_run(arch, width, *data.scientist, cfg.training, run_seed, device, flip)
+        r = train_run(arch, width, *data.scientist, cfg.training, run_seed, device,
+                      "signflip" if flip > 0 else None, flip)
         sci_seconds += r.seconds
         submissions.append(r.snapshots)
     with Timer(device) as tj:
@@ -93,7 +94,8 @@ def _subprocess(job: dict, workdir: Path) -> dict:
 def memory_cell(cfg: Config, arch: str, size: int, seed: int) -> dict:
     width = width_for_target(arch, size)
     common = dict(arch=arch, width=width, data_dir=str(Path(cfg.data_dir).resolve()),
-                  train_frac=cfg.train_frac, data_seed=cfg.data_seed, training=asdict(cfg.training))
+                  train_frac=cfg.train_frac, data_seed=cfg.data_seed, data=asdict(cfg.data),
+                  training=asdict(cfg.training))
     with tempfile.TemporaryDirectory(prefix="scicheck_mem_") as tmp:
         tmp = Path(tmp)
         ver_npy = tmp / "verifier.npy"

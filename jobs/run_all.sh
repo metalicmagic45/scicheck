@@ -10,3 +10,6 @@ wait
 
 python -m scicheck performance --device cuda:0
 python -m scicheck report
+
+python -m scicheck accuracy --config configs/datasplit.yaml --workers 4 --threads 1 --devices cuda:0
+python -m scicheck report --config configs/datasplit.yaml

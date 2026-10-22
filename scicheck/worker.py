@@ -6,7 +6,7 @@ import sys
 import numpy as np
 import torch
 
-from .config import JudgeConfig, TrainingConfig
+from .config import DataConfig, JudgeConfig, TrainingConfig
 from .data import load_task_data
 from .judge import train_judge, validate
 from .models import ARCHS
@@ -23,10 +23,11 @@ def main(job_path: str) -> None:
     result: dict = {}
 
     if job["stage"] == "train":
-        data = load_task_data(ARCHS[job["arch"]].dataset, job["data_dir"], job["train_frac"], job["data_seed"])
+        data = load_task_data(ARCHS[job["arch"]].dataset, job["data_dir"], job["train_frac"], job["data_seed"],
+                              DataConfig(**job["data"]))
         X, y = data.verifier if job["partition"] == "verifier" else data.scientist
         r = train_run(job["arch"], job["width"], X, y, TrainingConfig(**job["training"]),
-                      job["seed"], device, job["flip"])
+                      job["seed"], device, "signflip" if job["flip"] > 0 else None, job["flip"])
         np.save(job["out"], r.snapshots)
         result = dict(seconds=r.seconds, n_params=r.n_params, n_snapshots=len(r.snapshots))
     elif job["stage"] == "judge":

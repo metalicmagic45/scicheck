@@ -5,8 +5,10 @@ from typing import Callable
 
 import torch.nn as nn
 
+from .data import HIGGS_FEATURES
 
-def build_mlp(h: int, in_dim: int = 8) -> nn.Module:
+
+def build_mlp(h: int, in_dim: int = HIGGS_FEATURES) -> nn.Module:
     return nn.Sequential(
         nn.Linear(in_dim, h), nn.ReLU(),
         nn.Linear(h, h), nn.ReLU(),
@@ -40,7 +42,7 @@ class ArchSpec:
 
 
 ARCHS: dict[str, ArchSpec] = {
-    "mlp": ArchSpec("mlp", "placement", "binary", build_mlp, 3),
+    "mlp": ArchSpec("mlp", "higgs", "binary", build_mlp, 3),
     "cnn": ArchSpec("cnn", "petimages", "binary", build_cnn, 3),
     "ae": ArchSpec("ae", "mnist", "reconstruction", build_ae, 2),
 }

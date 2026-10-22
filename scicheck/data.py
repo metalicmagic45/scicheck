@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import gzip
 import io
-import shutil
+import os
 import urllib.request
 import warnings
 import zipfile
@@ -11,16 +12,17 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from .config import DataConfig
+
 PETIMAGES_URL = (
     "https://download.microsoft.com/download/3/E/1/"
     "3E1C3F21-ECDB-4869-8368-6DEBA77B919F/kagglecatsanddogs_5340.zip"
 )
 PETIMAGES_ZIP = "kagglecatsanddogs_5340.zip"
-PLACEMENT_KAGGLE = "sahilislam007/college-student-placement-factors-dataset"
-PLACEMENT_CSV = "placement.csv"
+HIGGS_URL = "https://archive.ics.uci.edu/static/public/280/higgs.zip"
+HIGGS_ZIP = "higgs.zip"
+HIGGS_FEATURES = 28
 
-N_PETIMAGES = 1500
-N_MNIST = 3000
 IMG_SIZE = 32
 
 
@@ -28,6 +30,7 @@ IMG_SIZE = 32
 class TaskData:
     X: np.ndarray
     y: np.ndarray
+    n_train: int
     n_verifier: int
 
     @property
@@ -36,21 +39,27 @@ class TaskData:
 
     @property
     def scientist(self) -> tuple[np.ndarray, np.ndarray]:
-        return self.X, self.y
+        return self.X[: self.n_train], self.y[: self.n_train]
+
+    @property
+    def test(self) -> tuple[np.ndarray, np.ndarray]:
+        return self.X[self.n_train:], self.y[self.n_train:]
 
 
-def load_task_data(dataset: str, data_dir: str | Path, train_frac: float, data_seed: int = 0) -> TaskData:
-    data_dir = Path(data_dir)
-    if dataset == "placement":
-        X, y = load_placement(data_dir)
+def load_task_data(dataset: str, data_dir: str | Path, train_frac: float, data_seed: int = 0,
+                   dcfg: DataConfig | None = None) -> TaskData:
+    data_dir, dcfg = Path(data_dir), dcfg or DataConfig()
+    if dataset == "higgs":
+        X, y = load_higgs(data_dir, n=dcfg.higgs_rows, seed=data_seed)
     elif dataset == "petimages":
-        X, y = load_petimages(data_dir, seed=data_seed)
+        X, y = load_petimages(data_dir, n=dcfg.petimages, seed=data_seed)
     elif dataset == "mnist":
-        X = load_mnist(data_dir, seed=data_seed)
+        X = load_mnist(data_dir, n=dcfg.mnist, seed=data_seed)
         y = X
     else:
         raise ValueError(f"unknown dataset {dataset!r}")
-    return TaskData(X=X, y=y, n_verifier=int(round(train_frac * len(X))))
+    n_train = len(X) - int(round(dcfg.test_frac * len(X)))
+    return TaskData(X=X, y=y, n_train=n_train, n_verifier=int(round(train_frac * n_train)))
 
 
 def to_tensors(X: np.ndarray, y: np.ndarray, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
@@ -58,45 +67,54 @@ def to_tensors(X: np.ndarray, y: np.ndarray, device: torch.device) -> tuple[torc
             torch.as_tensor(y, dtype=torch.float32, device=device))
 
 
-def _find_placement_csv(data_dir: Path) -> Path:
-    p = data_dir / "raw" / PLACEMENT_CSV
-    if p.exists():
-        return p
-    hits = sorted((data_dir / "raw").glob("*lacement*.csv"))
-    if hits:
-        return hits[0]
+def _save_cache(cache: Path, **arrays) -> None:
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cache.with_name(f"{cache.name}.{os.getpid()}.part")
+    with open(tmp, "wb") as f:
+        np.savez_compressed(f, **arrays)
+    os.replace(tmp, cache)
+
+
+def _open_higgs_csv(raw: Path):
+    if (raw / "HIGGS.csv").exists():
+        return open(raw / "HIGGS.csv", "rb")
+    if (raw / "HIGGS.csv.gz").exists():
+        return gzip.open(raw / "HIGGS.csv.gz")
+    if (raw / HIGGS_ZIP).exists():
+        zf = zipfile.ZipFile(raw / HIGGS_ZIP)
+        inner = next(x for x in zf.namelist() if x.lower().startswith("higgs.csv"))
+        f = zf.open(inner)
+        return gzip.open(f) if inner.lower().endswith(".gz") else f
     raise FileNotFoundError(
-        f"Placement CSV not found at {p}. Run `python -m scicheck download`, or download "
-        f"https://www.kaggle.com/datasets/{PLACEMENT_KAGGLE} and save the CSV as {p}."
+        f"HIGGS not found in {raw}. Run `python -m scicheck download`, or download {HIGGS_URL} "
+        f"and save it as {raw / HIGGS_ZIP} (HIGGS.csv.gz or HIGGS.csv there also work)."
     )
 
 
-def load_placement(data_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+def load_higgs(data_dir: Path, n: int, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    if n <= 0:
+        raise ValueError("data.higgs_rows must be positive (the full file is 11M rows)")
+    cache = data_dir / "processed" / f"higgs_{n}_seed{seed}.npz"
+    if cache.exists():
+        z = np.load(cache)
+        return z["X"], z["y"]
+
     import pandas as pd
 
-    df = pd.read_csv(_find_placement_csv(data_dir))
-    label = next(c for c in df.columns if c.strip().lower() == "placement")
-    df = df.drop(columns=[c for c in df.columns if c.strip().lower() in ("college_id", "student_id", "id")])
-
-    def to_numeric(col):
-        if not pd.api.types.is_numeric_dtype(col):
-            mapped = col.astype(str).str.strip().str.lower().map({"yes": 1.0, "no": 0.0})
-            if mapped.isna().any():
-                raise ValueError(f"column {col.name!r} has non Yes/No strings")
-            return mapped
-        return col.astype(float)
-
-    df = df.apply(to_numeric)
-    y = df.pop(label).to_numpy(np.float32)
-    X = df.to_numpy(np.float32)
-    if X.shape[1] != 8:
-        raise ValueError(f"expected 8 predictors after preprocessing, got {X.shape[1]}: {list(df.columns)}")
-    X = (X - X.mean(0)) / np.where(X.std(0) > 0, X.std(0), 1.0)
-    return X.astype(np.float32), y
+    with _open_higgs_csv(data_dir / "raw") as f:
+        df = pd.read_csv(f, header=None, nrows=n, dtype=np.float32)
+    if df.shape[1] != HIGGS_FEATURES + 1 or len(df) < n:
+        raise ValueError(f"expected {n} rows x {HIGGS_FEATURES + 1} columns, got {df.shape}")
+    order = np.random.default_rng(seed).permutation(n)
+    y = df.iloc[:, 0].to_numpy(np.float32)[order]
+    X = df.iloc[:, 1:].to_numpy(np.float32)[order]
+    X = ((X - X.mean(0)) / np.where(X.std(0) > 0, X.std(0), 1.0)).astype(np.float32)
+    _save_cache(cache, X=X, y=y)
+    return X, y
 
 
-def load_petimages(data_dir: Path, n: int = N_PETIMAGES, size: int = IMG_SIZE, seed: int = 0):
-    cache = data_dir / "processed" / f"petimages_{n}_{size}px_seed{seed}.npz"
+def load_petimages(data_dir: Path, n: int = 0, size: int = IMG_SIZE, seed: int = 0):
+    cache = data_dir / "processed" / f"petimages_{n or 'all'}_{size}px_seed{seed}.npz"
     if cache.exists():
         z = np.load(cache)
         return z["X"].astype(np.float32) / 255.0, z["y"].astype(np.float32)
@@ -104,7 +122,7 @@ def load_petimages(data_dir: Path, n: int = N_PETIMAGES, size: int = IMG_SIZE, s
     from PIL import Image
 
     rng = np.random.default_rng(seed)
-    per_class = n // 2
+    per_class = n // 2 if n else None
     src_zip = data_dir / "raw" / PETIMAGES_ZIP
     src_dir = data_dir / "raw" / "PetImages"
     if src_zip.exists():
@@ -119,10 +137,9 @@ def load_petimages(data_dir: Path, n: int = N_PETIMAGES, size: int = IMG_SIZE, s
     else:
         raise FileNotFoundError(f"PetImages not found ({src_zip} or {src_dir}). Run `python -m scicheck download`.")
 
-    images, labels = [], []
-    for label, cls in enumerate(("Cat", "Dog")):
-        files = listing[cls]
-        got = 0
+    by_class = []
+    for cls in ("Cat", "Dog"):
+        files, imgs = listing[cls], []
         for i in rng.permutation(len(files)):
             try:
                 with warnings.catch_warnings():
@@ -131,31 +148,31 @@ def load_petimages(data_dir: Path, n: int = N_PETIMAGES, size: int = IMG_SIZE, s
                     img = img.convert("RGB").resize((size, size), Image.BILINEAR)
             except Exception:
                 continue
-            images.append(np.asarray(img, dtype=np.uint8))
-            labels.append(label)
-            got += 1
-            if got == per_class:
+            imgs.append(np.asarray(img, dtype=np.uint8))
+            if len(imgs) == per_class:
                 break
-    X = np.stack(images).transpose(0, 3, 1, 2)
-    y = np.asarray(labels, dtype=np.uint8)
+        by_class.append(imgs)
+    k = min(len(c) for c in by_class)
+    if per_class and k < per_class:
+        raise ValueError(f"only {k} readable images in one class, {per_class} requested")
+    X = np.stack(by_class[0][:k] + by_class[1][:k]).transpose(0, 3, 1, 2)
+    y = np.repeat(np.arange(2, dtype=np.uint8), k)
     order = rng.permutation(len(X))
     X, y = X[order], y[order]
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(cache, X=X, y=y)
+    _save_cache(cache, X=X, y=y)
     return X.astype(np.float32) / 255.0, y.astype(np.float32)
 
 
-def load_mnist(data_dir: Path, n: int = N_MNIST, seed: int = 0) -> np.ndarray:
-    cache = data_dir / "processed" / f"mnist_{n}_seed{seed}.npz"
+def load_mnist(data_dir: Path, n: int = 0, seed: int = 0) -> np.ndarray:
+    cache = data_dir / "processed" / f"mnist_{n or 'all'}_seed{seed}.npz"
     if cache.exists():
         return np.load(cache)["X"].astype(np.float32) / 255.0
     from torchvision.datasets import MNIST
 
     ds = MNIST(root=str(data_dir / "raw"), train=True, download=True)
-    idx = np.random.default_rng(seed).choice(len(ds.data), size=n, replace=False)
-    X = ds.data.numpy()[idx].reshape(n, -1)
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(cache, X=X)
+    idx = np.random.default_rng(seed).choice(len(ds.data), size=n or len(ds.data), replace=False)
+    X = ds.data.numpy()[idx].reshape(len(idx), -1)
+    _save_cache(cache, X=X)
     return X.astype(np.float32) / 255.0
 
 
@@ -175,34 +192,23 @@ def _download(url: str, dest: Path) -> None:
     tmp.replace(dest)
 
 
-def download_all(data_dir: str | Path, data_seed: int = 0) -> None:
-    data_dir = Path(data_dir)
+def download_all(data_dir: str | Path, data_seed: int = 0, dcfg: DataConfig | None = None) -> None:
+    data_dir, dcfg = Path(data_dir), dcfg or DataConfig()
     raw = data_dir / "raw"
     raw.mkdir(parents=True, exist_ok=True)
 
     print("[mnist]")
-    load_mnist(data_dir, seed=data_seed)
+    X = load_mnist(data_dir, n=dcfg.mnist, seed=data_seed)
+    print(f"  {len(X)} digits")
 
     print("[petimages]")
     if not (raw / PETIMAGES_ZIP).exists() and not (raw / "PetImages").exists():
         _download(PETIMAGES_URL, raw / PETIMAGES_ZIP)
-    X, y = load_petimages(data_dir, seed=data_seed)
+    X, y = load_petimages(data_dir, n=dcfg.petimages, seed=data_seed)
     print(f"  {len(X)} images, {int(y.sum())} dogs")
 
-    print("[placement]")
-    try:
-        _find_placement_csv(data_dir)
-    except FileNotFoundError:
-        try:
-            import kagglehub
-
-            path = Path(kagglehub.dataset_download(PLACEMENT_KAGGLE))
-            csv = next(path.rglob("*.csv"))
-            shutil.copy(csv, raw / PLACEMENT_CSV)
-        except Exception as e:  # noqa: BLE001
-            print(f"  automatic download failed ({type(e).__name__}: {e})")
-            print(f"  -> download https://www.kaggle.com/datasets/{PLACEMENT_KAGGLE}")
-            print(f"     and save the CSV as {raw / PLACEMENT_CSV}")
-            return
-    X, y = load_placement(data_dir)
-    print(f"  {X.shape[0]} rows x {X.shape[1]} predictors, {y.mean():.1%} placed")
+    print("[higgs]")
+    if not any((raw / f).exists() for f in (HIGGS_ZIP, "HIGGS.csv.gz", "HIGGS.csv")):
+        _download(HIGGS_URL, raw / HIGGS_ZIP)
+    X, y = load_higgs(data_dir, n=dcfg.higgs_rows, seed=data_seed)
+    print(f"  {X.shape[0]} rows x {X.shape[1]} features, {y.mean():.1%} signal")

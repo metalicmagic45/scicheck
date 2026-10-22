@@ -25,7 +25,7 @@ def cmd_info(cfg, args):
 def cmd_download(cfg, args):
     from .data import download_all
 
-    download_all(cfg.data_dir, cfg.data_seed)
+    download_all(cfg.data_dir, cfg.data_seed, cfg.data)
 
 
 def cmd_accuracy(cfg, args):
