@@ -27,24 +27,18 @@ python -m scicheck accuracy --config configs/smoke.yaml
 python -m scicheck report   --config configs/smoke.yaml
 ```
 
-Full experiments on a SLURM cluster (run `download` first so the jobs find the cached data):
+Full experiments, on one GPU machine with no scheduler needed:
 
 ```bash
-mkdir -p logs                     # SLURM writes job output here and won't create the folder
-sbatch jobs/accuracy.sbatch       # main experiment, one GPU job per architecture
-sbatch jobs/datasplit.sbatch      # data-split control, writes its own report
-sbatch jobs/performance.sbatch    # runtime sweep (GPU)
-sbatch jobs/memory.sbatch         # memory sweep (CPU only, the longest job)
+tmux new -s scicheck              # or screen, so the run survives if you disconnect
+GPUS=0 jobs/run_all.sh            # GPUS=0,1,2 spreads the three architectures over three GPUs
 ```
 
-When they have all finished, build the main report:
-
-```bash
-python -m scicheck report
-```
-
-On a single machine without SLURM, `jobs/run_all.sh` runs the same steps in order. Each step can
-also be run by hand:
+`jobs/run_all.sh` downloads the data, then runs the main experiment (one job per architecture)
+alongside the memory sweep (CPU only, the longest step), then the data-split control, then the
+runtime sweep on its own so nothing else skews its timings, and finally both reports. Progress is
+printed as each step starts and finishes; each step's output is in `logs/<step>.log`. `WORKERS`
+(default 4) sets the worker processes per accuracy job. Each step can also be run by hand:
 
 ```bash
 python -m scicheck accuracy    --config configs/paper.yaml --workers 4 --devices cuda:0
@@ -65,8 +59,8 @@ overfitting. [HOW_IT_WORKS.md](HOW_IT_WORKS.md) has the run and seed counts. The
 
 `configs/datasplit.yaml` is the data-split control: the same design at 300k only, with the verifier
 trained on all of the scientist's training data (`train_frac: 1.0`) instead of 30%. It writes to
-`results/datasplit/`. Every job resumes where it stopped: if one hits its time limit, submit it
-again.
+`results/datasplit/`. Every step resumes where it stopped: if the run is interrupted or a step
+fails, run it again and finished work is skipped.
 
 ## Output
 
