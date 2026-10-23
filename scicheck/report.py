@@ -36,7 +36,6 @@ def size_label(n: int) -> str:
 
 
 def decide(df: pd.DataFrame, theta: float, rho: float, variant: str = "at+eta") -> pd.Series:
-    """Accept where every check named in `variant` ("at+eta", "iforest", "replay", ...) passes."""
     passed = pd.Series(True, index=df.index)
     for check in variant.split("+"):
         if check == "eta":

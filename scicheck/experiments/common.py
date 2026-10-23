@@ -29,8 +29,6 @@ def check_or_write_config(cfg: Config, out: Path, filename: str = "config.json")
     try:
         write_json(path, cfg.to_dict())
     except PermissionError:
-        # Jobs started together race to write this file, and Windows refuses to replace a file another
-        # process is replacing at the same moment. Check the winner's copy instead.
         if not path.exists():
             raise
         check_or_write_config(cfg, out, filename)

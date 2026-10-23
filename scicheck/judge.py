@@ -164,8 +164,6 @@ def train_judge(T: np.ndarray, cfg: JudgeConfig, rho: float, device: torch.devic
 
 
 def replay_fraction(T_norm: np.ndarray, steps_per_epoch: int, tol: float) -> float:
-    """Share of steps that nearly repeat the step one epoch earlier: their distance to it is at most `tol`
-    times the run's median step-to-step distance. Honest training never repeats itself; a replayed epoch does."""
     E = steps_per_epoch
     if len(T_norm) <= E:
         return 0.0
@@ -176,7 +174,6 @@ def replay_fraction(T_norm: np.ndarray, steps_per_epoch: int, tol: float) -> flo
 
 def validate(judge: Judge, Ts: np.ndarray, theta: float, steps_per_epoch: int | None = None,
              replay_tol: float = 0.02, psi_max: float = 0.05) -> Verdict:
-    """Accept a run when it passes the AT check, the η check and, given `steps_per_epoch`, the replay check."""
     T = judge.normalize(Ts)
     timeline = score_timeline(judge.model, T, judge.cfg)
     phi = float((timeline > judge.tau).mean())

@@ -63,8 +63,6 @@ def runtime_cell(cfg: Config, arch: str, size: int, seed: int, device: torch.dev
         for s in submissions:
             validate(judge, s, vcfg.theta, spe, vcfg.replay_tol, vcfg.psi_max)
     score_s = ts.seconds / len(submissions) if submissions else float("nan")
-    # Retraining: what checking a run by training the blueprint again would cost, i.e. one honest full-data run.
-    # SciCheck verification: the verifier's reference run, fitting the judge, and scoring one submission.
     return dict(arch=arch, target_size=size, n_params=ver.n_params, seed=seed, device=str(device),
                 verifier_s=ver.seconds, scientists_s=sci_seconds, judge_s=tj.seconds + ts.seconds,
                 judge_train_s=tj.seconds, score_s=score_s,
@@ -123,7 +121,6 @@ def memory_cell(cfg: Config, arch: str, size: int, seed: int) -> dict:
                              judge=asdict(cfg.judge), rho=cfg.validate.rho, theta=cfg.validate.theta,
                              seed=derive_seed("perf-judge", arch, size, seed)), tmp)
     sci_mb = sum(sci_peaks)
-    # peak_mb is the most any one stage needs: the stages run one after another, so it is what a machine must have.
     return dict(arch=arch, target_size=size, n_params=ver["n_params"], seed=seed,
                 verifier_mb=ver["peak_rss_mb"], scientists_mb=sci_mb, judge_mb=j["peak_rss_mb"],
                 scientist_mb=sci_mb / len(sci_peaks) if sci_peaks else float("nan"),

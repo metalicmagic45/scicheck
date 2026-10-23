@@ -57,8 +57,6 @@ def evaluate(model: nn.Module, X: torch.Tensor, y: torch.Tensor, task: str, loss
 
 
 def verifier_steps(mode: str, cfg: TrainingConfig, n_scientist_rows: int) -> int | None:
-    """Optimizer steps for the verifier: "match" gives it the scientist's step count on its smaller
-    data slice, "epochs" trains it for the same number of epochs (fewer steps when train_frac < 1)."""
     if mode == "epochs":
         return None
     if mode == "match":
@@ -79,7 +77,6 @@ def train_run(
     eval_data: tuple[np.ndarray, np.ndarray] | None = None,
     steps: int | None = None,
 ) -> RunResult:
-    """Train for cfg.epochs epochs, or for exactly `steps` optimizer steps when given."""
     if attack is not None and attack not in ATTACKS:
         raise ValueError(f"unknown attack {attack!r}, expected one of {ATTACKS}")
     spec = ARCHS[arch]
