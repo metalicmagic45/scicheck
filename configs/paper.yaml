@@ -9,9 +9,10 @@ sizes: [100000, 200000, 300000, 400000, 500000]
 attacks: [signflip, data, fabricate]
 severities: [0.1, 0.3, 0.5]
 seeds: [0]
-n_honest: 10
+n_honest: 15
 n_malicious: 5
 train_frac: 0.3
+verifier_steps: match
 data_seed: 0
 save_snapshots: true
 
@@ -49,9 +50,10 @@ judge:
 validate:
   theta: 0.3
   rho: 0.4
+  replay: true
 
 performance:
-  n_honest: 5
-  n_malicious: 5
+  n_honest: 2
+  n_malicious: 2
   severity: 0.3
   sweeps: [runtime, memory]

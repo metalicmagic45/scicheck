@@ -13,8 +13,9 @@ gradient signal-to-noise, effective signal η, loss, gradient and weight norms, 
 percentiles, skew and kurtosis, and one gradient norm per layer. A run becomes a time series of
 these snapshots. They are summaries, not raw weights, so runs from different seeds are comparable.
 
-**3. Build a judge.** The verifier trains a reference model on 30% of the training data and uses
-its snapshots to fit:
+**3. Build a judge.** The verifier trains a reference model on 30% of the training data, for as
+many optimizer steps as the scientist takes on the full training data (`verifier_steps: match`), and
+uses its snapshots to fit:
 - an **Anomaly Transformer** that scores each step by how unusual it looks, with threshold τ set
   at the 99th percentile of its scores on a validation slice of the verifier's own snapshots;
 - an **effective-signal cutoff** γ = ρ · η̄_v, where η̄_v is the mean η over the snapshots the
@@ -28,6 +29,12 @@ The run is accepted only if both checks pass:
 
 The two checks catch different things: the transformer finds unusual patterns over time, and the
 η check finds runs whose gradients are mostly noise.
+
+With `validate.replay: true` there is a third check. Each step is compared with the step one epoch
+earlier (the agreed dataset size and batch size fix the epoch length); ψ is the share of steps whose
+distance to it is at most `replay_tol` times the run's median step-to-step distance. Honest training
+never repeats itself, while a fabricated run that replays an epoch does, so the run must also have
+ψ ≤ `psi_max`. It targets replay-style fabrication; fresh fake snapshots are left to the other checks.
 
 ## Experiments
 
@@ -43,40 +50,48 @@ the same verifier snapshots and thresholded the same way (each alone and with th
 tested on an MLP (HIGGS particle-physics data), a CNN (cats vs dogs) and an autoencoder (MNIST)
 at five model sizes. A held-out slice of each dataset, which neither party trains on, records
 train vs held-out loss every epoch so overfitting shows up in the report. `accuracy` measures
-false positives and false negatives, `performance` measures runtime and memory, and `report`
+false positives and false negatives, `performance` measures what verification costs next to retraining (2 clean + 2 dirty runs per size)
+and each stage's peak memory, and `report`
 builds the tables and figures.
 
 ### Run counts
 
 There are 3 architectures × 5 model sizes (100k-500k parameters), and each (architecture, size)
 gets one judge. Each judge is built from one verifier model and checks:
-- **10 clean runs**, shared by every attack cell, which give its false-positive rate;
+- **15 clean runs**, shared by every attack cell, which give its false-positive rate;
 - **3 attack types × 3 severities × 5 dirty runs** = 45 dirty runs, which give its false-negative
   rate.
 
-A table cell is one (attack, severity) pair: its 5 dirty runs against the judge's 10 clean runs.
+A table cell is one (attack, severity) pair: its 5 dirty runs against the judge's 15 clean runs.
 Every run has its own seed, derived from its architecture, size, role, attack, severity and index.
 
 **Main experiment** (`configs/paper.yaml`, verifier trains on 30% of the training data):
 
 ```
-3 architectures × 5 sizes × (3 attack types × 3 severities × 5 dirty + 10 clean) + 15 verifiers
-= 15 × 55 + 15
-= 840 trained models, 15 judges
+3 architectures × 5 sizes × (3 attack types × 3 severities × 5 dirty + 15 clean) + 15 verifiers
+= 15 × 60 + 15
+= 915 trained models, 15 judges
 ```
 
 **Data-split control** (`configs/datasplit.yaml`, verifier trains on 100% of the training data,
 300k only):
 
 ```
-3 architectures × 1 size × (3 attack types × 3 severities × 5 dirty + 10 clean) + 3 verifiers
-= 3 × 55 + 3
-= 168 trained models, 3 judges
+3 architectures × 1 size × (3 attack types × 3 severities × 5 dirty + 15 clean) + 3 verifiers
+= 3 × 60 + 3
+= 183 trained models, 3 judges
 ```
 
 The control's clean and dirty runs use the same seeds and data as the main experiment's 300k runs,
-so the only thing that changes is the verifier's data. Together the two experiments train 1,008
-models.
+so the only thing that changes is the verifier's data.
+
+**Step-matching ablation** (`configs/stepablation.yaml`, 300k only): the main experiment again, with
+`verifier_steps: epochs` so the verifier trains for the same number of epochs as the scientist and
+therefore takes about 30% as many optimizer steps. It has the same 183 models as the data-split control, with
+the same seeds and data as the main experiment's 300k runs, so comparing it with the main run shows
+what step matching does and nothing else.
+
+Together the three experiments train 1,281 models.
 
 ### Seeds
 
@@ -95,11 +110,11 @@ each clean/dirty run ──► snapshots ──► scored by the judge and the b
 Each of these gets its own seed. Main experiment:
 
 ```
-3 architectures × 5 sizes × (3 attack types × 3 severities × 5 dirty + 10 clean) = 825 clean + dirty runs
+3 architectures × 5 sizes × (3 attack types × 3 severities × 5 dirty + 15 clean) = 900 clean + dirty runs
 + 15 judges
 + 15 verifiers
 + 15 baselines
-= 870 seeds, all different
+= 945 seeds, all different
 ```
 
 Each baseline seed fits both baseline models, so 15 seeds give 30 baseline models. Every trained
@@ -107,7 +122,7 @@ model also splits its seed into sub-seeds for weight initialization, batch order
 poisoned rows and augmentation, so no two models start from the same weights or see the same
 batches.
 
-The data-split control follows the same pattern, 165 + 3 + 3 + 3 = 174 seeds, but reuses the
+The data-split control follows the same pattern, 180 + 3 + 3 + 3 = 189 seeds, but reuses the
 seeds of the main experiment's 300k units on purpose: the verifier starts from the same seed and
 sees different data (100% instead of 30%), so it produces a different judge.
 

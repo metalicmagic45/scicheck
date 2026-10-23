@@ -11,6 +11,7 @@ seeds: [0]
 n_honest: 2
 n_malicious: 2
 train_frac: 0.3
+verifier_steps: match
 save_snapshots: true
 
 data:
@@ -19,7 +20,7 @@ data:
   mnist: 2000
 
 training:
-  epochs: 5
+  epochs: 20
   batch_size: 32
   augment: true
 
@@ -31,3 +32,6 @@ judge:
 performance:
   n_honest: 1
   n_malicious: 1
+
+validate:
+  replay: true

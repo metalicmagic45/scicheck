@@ -47,12 +47,15 @@ class JudgeConfig:
 class ValidateConfig:
     theta: float = 0.3
     rho: float = 0.4
+    replay: bool = False
+    replay_tol: float = 0.02
+    psi_max: float = 0.05
 
 
 @dataclass
 class PerformanceConfig:
-    n_honest: int = 5
-    n_malicious: int = 5
+    n_honest: int = 2
+    n_malicious: int = 2
     severity: float = 0.3
     sweeps: tuple[str, ...] = ("runtime", "memory")
 
@@ -69,9 +72,10 @@ class Config:
     attacks: list[str] = field(default_factory=lambda: ["signflip", "data", "fabricate"])
     severities: list[float] = field(default_factory=lambda: [0.1, 0.3, 0.5])
     seeds: list[int] = field(default_factory=lambda: [0])
-    n_honest: int = 10
+    n_honest: int = 15
     n_malicious: int = 5
     train_frac: float = 0.3
+    verifier_steps: str = "match"
     data_seed: int = 0
     save_snapshots: bool = True
     data: DataConfig = field(default_factory=DataConfig)

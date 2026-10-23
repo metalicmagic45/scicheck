@@ -15,6 +15,8 @@ ATTACK_COLORS = {"signflip": "#2a78d6", "data": "#d97a1f", "fabricate": "#3a9a5b
 ATTACK_LABEL = {"signflip": "Sign flip", "data": "Unauthorized data", "fabricate": "Fabricated run"}
 PHI_COL = {"at": "phi", "iforest": "phi_iforest", "ocsvm": "phi_ocsvm"}
 CHECKS = {
+    "at+eta+replay": "SciCheck + replay",
+    "replay": "Replay only",
     "at+eta": "SciCheck (AT + η)",
     "at": "AT only",
     "eta": "η only",
@@ -34,12 +36,25 @@ def size_label(n: int) -> str:
 
 
 def decide(df: pd.DataFrame, theta: float, rho: float, variant: str = "at+eta") -> pd.Series:
-    detector, _, with_eta = variant.partition("+")
-    eta_pass = df.eta_s >= rho * df.eta_v
-    if detector == "eta":
-        return eta_pass
-    passed = df[PHI_COL[detector]] <= theta
-    return passed & eta_pass if with_eta else passed
+    """Accept where every check named in `variant` ("at+eta", "iforest", "replay", ...) passes."""
+    passed = pd.Series(True, index=df.index)
+    for check in variant.split("+"):
+        if check == "eta":
+            passed &= df.eta_s >= rho * df.eta_v
+        elif check == "replay":
+            passed &= df.replay_pass.astype(bool)
+        else:
+            passed &= df[PHI_COL[check]] <= theta
+    return passed
+
+
+def has_checks(cells: pd.DataFrame, variant: str) -> bool:
+    cols = {"eta": "eta_s", "replay": "replay_pass", **PHI_COL}
+    return all(cols[c] in cells for c in variant.split("+"))
+
+
+def default_variant(cells: pd.DataFrame) -> str:
+    return "at+eta+replay" if "replay_pass" in cells else "at+eta"
 
 
 def expand_cells(df: pd.DataFrame) -> pd.DataFrame:
@@ -108,7 +123,7 @@ def table_v(cells: pd.DataFrame, archs) -> pd.DataFrame:
 
 def comparison(cells: pd.DataFrame, theta: float, rho: float, archs) -> pd.DataFrame:
     rows = []
-    checks = [v for v in CHECKS if v.partition("+")[0] == "eta" or PHI_COL[v.partition("+")[0]] in cells]
+    checks = [v for v in CHECKS if has_checks(cells, v)]
     for a in archs:
         d = cells[cells.arch == a].copy()
         for v in checks:
@@ -127,18 +142,26 @@ def sensitivity(cells: pd.DataFrame, archs) -> pd.DataFrame:
         d = cells[cells.arch == a].copy()
         for th in THETA_GRID:
             for rh in RHO_GRID:
-                d["_acc"] = decide(d, th, rh)
+                d["_acc"] = decide(d, th, rh, default_variant(d))
                 rows.append({"arch": a, "theta": th, "rho": rh, **rates(counts(d, "_acc")).to_dict()})
     return pd.DataFrame(rows)
+
+
+TABLE_VI = (
+    ("runtime*.csv", "retrain_s", "Retraining (s)"),
+    ("runtime*.csv", "verify_s", "SciCheck verification (s)"),
+    ("memory*.csv", "peak_mb", "Peak memory per model (MB)"),
+)
 
 
 def table_vi(out: Path, archs) -> pd.DataFrame | None:
     perf = out / "performance"
     frames = []
-    for pattern, col, label in (("runtime*.csv", "total_s", "Total Time (s)"), ("memory*.csv", "total_mb", "Total Memory (MB)")):
+    for pattern, col, label in TABLE_VI:
         files = sorted(perf.glob(pattern))
-        if files:
-            d = pd.concat([pd.read_csv(f) for f in files]).groupby(["target_size", "arch"])[col].mean().unstack("arch")
+        d = pd.concat([pd.read_csv(f) for f in files]) if files else None
+        if d is not None and col in d:
+            d = d.groupby(["target_size", "arch"])[col].mean().unstack("arch")
             d = d[[a for a in archs if a in d.columns]]
             d.columns = pd.MultiIndex.from_product([[label], [ARCH_LABEL.get(c, c) for c in d.columns]])
             frames.append(d)
@@ -288,7 +311,8 @@ def build_report(cfg: Config) -> Path:
     rep.mkdir(parents=True, exist_ok=True)
     theta, rho = cfg.validate.theta, cfg.validate.rho
     md = [f"# SciCheck results: `{cfg.name}`", "",
-          f"θ = {theta}, ρ = {rho}, r = {cfg.judge.r}, train_frac = {cfg.train_frac}. "
+          f"θ = {theta}, ρ = {rho}, r = {cfg.judge.r}, train_frac = {cfg.train_frac}, "
+          f"replay check {'on' if cfg.validate.replay else 'off'}. "
           "Positive class = malicious (rejected).", ""]
 
     try:
@@ -314,7 +338,9 @@ def build_report(cfg: Config) -> Path:
                "## Figure 2 - F1 by model size and attack", "", "![fig2](fig2_f1_by_size.png)", "",
                "## Baselines and ablation (pooled over all cells)", "",
                "Every check uses the same verifier snapshots, τ at the (1 - r)-quantile of its validation "
-               "scores, and ϕ ≤ θ. Isolation Forest and One-Class SVM score each snapshot on its own.", "",
+               "scores, and ϕ ≤ θ. Isolation Forest and One-Class SVM score each snapshot on its own. "
+               "The replay check rejects runs whose steps repeat the step one epoch earlier "
+               f"(ψ > {cfg.validate.psi_max}).", "",
                to_markdown(comp), "",
                "## Sensitivity of FalsePositive / FalseNegative to (θ, ρ)", "",
                "Full grid in `sensitivity_theta_rho.csv`; the paper's operating point is outlined.", "",
@@ -333,7 +359,13 @@ def build_report(cfg: Config) -> Path:
     t6 = table_vi(out, cfg.architectures)
     if t6 is not None:
         t6.to_csv(rep / "table_vi_runtime_memory.csv")
-        md += ["## Table VI - total runtime and memory", "", to_markdown(t6, "{:,.2f}"), ""]
+        md += ["## Table VI - cost of verification vs retraining", "",
+               "Retraining: one honest run of the blueprint on the full training data, the cost of checking a "
+               "run by training it again. SciCheck verification: the verifier's reference run "
+               f"({cfg.train_frac:.0%} of the data, verifier_steps = {cfg.verifier_steps}), fitting the judge, and "
+               "scoring one submission. Peak memory: the most any single stage (verifier, one scientist, or judge) "
+               "needs, each measured in its own process on CPU. Raw per-stage numbers are in `performance/`.", "",
+               to_markdown(t6, "{:,.2f}"), ""]
 
     (rep / "report.md").write_text("\n".join(md), encoding="utf-8")
     return rep / "report.md"

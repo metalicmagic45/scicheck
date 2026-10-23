@@ -59,6 +59,10 @@ finish accuracy_mlp accuracy_cnn accuracy_ae
 
 run datasplit accuracy --config configs/datasplit.yaml --workers "$WORKERS" --threads 1 \
     --devices "cuda:${GPU_LIST[0]}"
+# Step-matching ablation: the main experiment at 300k with the verifier trained for the same number of
+# epochs (fewer steps) instead of the scientist's step count.
+run stepablation accuracy --config configs/stepablation.yaml --workers "$WORKERS" --threads 1 \
+    --devices "cuda:${GPU_LIST[0]}"
 finish memory
 
 # The runtime sweep times training, so it runs with nothing else going.
@@ -66,4 +70,5 @@ run runtime performance --sweep runtime --device "cuda:${GPU_LIST[0]}"
 
 run report report
 run report_datasplit report --config configs/datasplit.yaml
-echo "Reports: results/paper/report/report.md and results/datasplit/report/report.md"
+run report_stepablation report --config configs/stepablation.yaml
+echo "Reports: results/{paper,datasplit,stepablation}/report/report.md"

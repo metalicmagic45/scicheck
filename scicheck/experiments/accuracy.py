@@ -14,7 +14,7 @@ from ..config import Config
 from ..data import load_task_data
 from ..judge import train_judge, validate
 from ..models import ARCHS, width_for_target
-from ..training import train_run
+from ..training import train_run, verifier_steps
 from ..utils import Timer, derive_seed, resolve_device, write_json
 from .common import check_or_write_config, run_jobs
 
@@ -40,7 +40,7 @@ def run_unit(cfg: Config, arch: str, size: int, seed: int, device: torch.device)
     width = width_for_target(arch, size)
 
     ver = train_run(arch, width, *data.verifier, cfg.training, derive_seed("verifier", arch, size, seed), device,
-                    eval_data=data.test)
+                    eval_data=data.test, steps=verifier_steps(cfg.verifier_steps, cfg.training, data.n_train))
     with Timer(device) as tj:
         judge = train_judge(ver.snapshots, cfg.judge, cfg.validate.rho, device,
                             derive_seed("judge", arch, size, seed))
@@ -55,16 +55,19 @@ def run_unit(cfg: Config, arch: str, size: int, seed: int, device: torch.device)
                 tau=judge.tau, eta_v=judge.eta_v, gamma=judge.gamma)
     rows, snaps = [], {"verifier": ver.snapshots}
     history = [dict(role="verifier", attack="none", severity=0.0, run_idx=0, **h) for h in ver.history]
+    vcfg = cfg.validate
+    spe = -(-data.n_train // cfg.training.batch_size) if vcfg.replay else None
 
     def scientist(attack: str | None, severity: float, idx: int, run_seed: int) -> None:
         r = train_run(arch, width, *data.scientist, cfg.training, run_seed, device, attack, severity,
                       eval_data=data.test)
-        v = validate(judge, r.snapshots, cfg.validate.theta)
+        v = validate(judge, r.snapshots, vcfg.theta, spe, vcfg.replay_tol, vcfg.psi_max)
         role, attack = ("malicious", attack) if attack else ("honest", "none")
         rows.append(dict(base, role=role, attack=attack, severity=severity, run_idx=idx, run_seed=run_seed,
                          n_snapshots=len(r.snapshots), final_loss=r.final_loss,
                          eval_loss=_last(r, "eval_loss"), eval_acc=_last(r, "eval_acc"), train_seconds=r.seconds,
                          phi=v.phi, eta_s=v.eta_s, at_pass=v.at_pass, eta_pass=v.eta_pass, accept=v.accept,
+                         **({"psi": v.psi, "replay_pass": v.replay_pass} if spe else {}),
                          **{f"phi_{k}": b.phi(judge, r.snapshots) for k, b in baselines.items()}))
         history.extend(dict(role=role, attack=attack, severity=severity, run_idx=idx, **h) for h in r.history)
         if cfg.save_snapshots:

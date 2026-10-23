@@ -1,0 +1,5 @@
+base: paper.yaml
+name: stepablation
+out_dir: results/stepablation
+sizes: [300000]
+verifier_steps: epochs

@@ -10,7 +10,7 @@ from .config import DataConfig, JudgeConfig, TrainingConfig
 from .data import load_task_data
 from .judge import train_judge, validate
 from .models import ARCHS
-from .training import train_run
+from .training import train_run, verifier_steps
 from .utils import peak_rss_mb
 
 RESULT_PREFIX = "SCICHECK_RESULT "
@@ -25,9 +25,12 @@ def main(job_path: str) -> None:
     if job["stage"] == "train":
         data = load_task_data(ARCHS[job["arch"]].dataset, job["data_dir"], job["train_frac"], job["data_seed"],
                               DataConfig(**job["data"]))
-        X, y = data.verifier if job["partition"] == "verifier" else data.scientist
-        r = train_run(job["arch"], job["width"], X, y, TrainingConfig(**job["training"]),
-                      job["seed"], device, "signflip" if job["flip"] > 0 else None, job["flip"])
+        is_verifier = job["partition"] == "verifier"
+        X, y = data.verifier if is_verifier else data.scientist
+        tcfg = TrainingConfig(**job["training"])
+        steps = verifier_steps(job["verifier_steps"], tcfg, data.n_train) if is_verifier else None
+        r = train_run(job["arch"], job["width"], X, y, tcfg,
+                      job["seed"], device, "signflip" if job["flip"] > 0 else None, job["flip"], steps=steps)
         np.save(job["out"], r.snapshots)
         result = dict(seconds=r.seconds, n_params=r.n_params, n_snapshots=len(r.snapshots))
     elif job["stage"] == "judge":

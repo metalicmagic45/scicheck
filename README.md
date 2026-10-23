@@ -49,7 +49,7 @@ python -m scicheck report      --config configs/paper.yaml
 ```
 
 `configs/paper.yaml` runs 100k-500k parameter models (batch size 128, 1 seed) against three attacks
-(sign flip, unauthorized data, fabricated run) at severities 0.1/0.3/0.5, with 10 honest runs per
+(sign flip, unauthorized data, fabricated run) at severities 0.1/0.3/0.5, with 15 honest runs per
 judge and 5 malicious runs per (attack, severity) cell. The datasets are large enough for that
 size: HIGGS (200k rows) for the MLP, all of PetImages (~25k images, flip/crop augmentation) for the
 CNN, and all 60k MNIST digits for the AE, each with 15% held out from both parties to measure
@@ -59,7 +59,9 @@ overfitting. [HOW_IT_WORKS.md](HOW_IT_WORKS.md) has the run and seed counts. The
 
 `configs/datasplit.yaml` is the data-split control: the same design at 300k only, with the verifier
 trained on all of the scientist's training data (`train_frac: 1.0`) instead of 30%. It writes to
-`results/datasplit/`. Every step resumes where it stopped: if the run is interrupted or a step
+`results/datasplit/`. `configs/stepablation.yaml` is the step-matching ablation: the main design at 300k
+with the verifier trained for the same number of epochs as the scientist (`verifier_steps: epochs`)
+instead of the same number of optimizer steps, writing to `results/stepablation/`. Every step resumes where it stopped: if the run is interrupted or a step
 fails, run it again and finished work is skipped.
 
 ## Output
@@ -75,10 +77,10 @@ Everything is written to the config's `out_dir` (e.g. `results/paper/`):
 
 | path | contents |
 |---|---|
-| `runs.csv` | one row per scientist run: role, attack, severity, phi, eta_s, both check results, accept, the baselines' phi_iforest / phi_ocsvm, final held-out loss |
+| `runs.csv` | one row per scientist run: role, attack, severity, phi, eta_s, psi, each check's result, accept, the baselines' phi_iforest / phi_ocsvm, final held-out loss |
 | `units/<arch>_<size>_s<seed>/` | that unit's runs, judge (`judge.pt`), snapshots, training diagnostics (`meta.json`) |
 | `units/.../history.csv` | train and held-out loss (and accuracy) after every epoch of every run |
-| `performance/` | runtime and peak memory per (arch, size) |
+| `performance/` | per (arch, size): retraining time vs SciCheck verification time (verifier, judge fit, scoring one submission), and peak memory of each stage |
 | `report/report.md` | Tables IV-VI, Figure 2, baselines vs ablation, θ/ρ sensitivity, overfitting table and gap plot, plus CSV/PNG of each |
 
 For reference, the original paper's 4k-12k sign-flip runs: the MLP and CNN rejected nearly all

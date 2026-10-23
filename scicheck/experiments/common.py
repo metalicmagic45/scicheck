@@ -25,7 +25,15 @@ def check_or_write_config(cfg: Config, out: Path, filename: str = "config.json")
                 f"{path} was written with different settings (differs in: {diff}).\n"
                 f"Use a different out_dir or delete {out} to start over."
             )
-    write_json(path, cfg.to_dict())
+        return
+    try:
+        write_json(path, cfg.to_dict())
+    except PermissionError:
+        # Jobs started together race to write this file, and Windows refuses to replace a file another
+        # process is replacing at the same moment. Check the winner's copy instead.
+        if not path.exists():
+            raise
+        check_or_write_config(cfg, out, filename)
 
 
 def _worker_device(devices: list[str]) -> torch.device:

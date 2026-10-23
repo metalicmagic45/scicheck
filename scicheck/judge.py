@@ -54,6 +54,8 @@ class Verdict:
     eta_s: float
     at_pass: bool
     eta_pass: bool
+    psi: float = 0.0
+    replay_pass: bool = True
 
 
 def _build_model(cfg: JudgeConfig, c_in: int) -> AnomalyTransformer:
@@ -161,9 +163,24 @@ def train_judge(T: np.ndarray, cfg: JudgeConfig, rho: float, device: torch.devic
     return Judge(model, mu, sd, tau, eta_v, gamma, cfg, diagnostics)
 
 
-def validate(judge: Judge, Ts: np.ndarray, theta: float) -> Verdict:
-    timeline = score_timeline(judge.model, judge.normalize(Ts), judge.cfg)
+def replay_fraction(T_norm: np.ndarray, steps_per_epoch: int, tol: float) -> float:
+    """Share of steps that nearly repeat the step one epoch earlier: their distance to it is at most `tol`
+    times the run's median step-to-step distance. Honest training never repeats itself; a replayed epoch does."""
+    E = steps_per_epoch
+    if len(T_norm) <= E:
+        return 0.0
+    lag = np.linalg.norm(T_norm[E:] - T_norm[:-E], axis=1)
+    step = float(np.median(np.linalg.norm(T_norm[1:] - T_norm[:-1], axis=1)))
+    return float((lag <= tol * step).mean())
+
+
+def validate(judge: Judge, Ts: np.ndarray, theta: float, steps_per_epoch: int | None = None,
+             replay_tol: float = 0.02, psi_max: float = 0.05) -> Verdict:
+    """Accept a run when it passes the AT check, the η check and, given `steps_per_epoch`, the replay check."""
+    T = judge.normalize(Ts)
+    timeline = score_timeline(judge.model, T, judge.cfg)
     phi = float((timeline > judge.tau).mean())
     eta_s = float(Ts[:, ETA_COL].mean())
-    at_pass, eta_pass = phi <= theta, eta_s >= judge.gamma
-    return Verdict(at_pass and eta_pass, phi, eta_s, at_pass, eta_pass)
+    psi = replay_fraction(T, steps_per_epoch, replay_tol) if steps_per_epoch else 0.0
+    at_pass, eta_pass, replay_pass = phi <= theta, eta_s >= judge.gamma, psi <= psi_max
+    return Verdict(at_pass and eta_pass and replay_pass, phi, eta_s, at_pass, eta_pass, psi, replay_pass)

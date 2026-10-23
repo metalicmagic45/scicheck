@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
@@ -7,10 +8,11 @@ from scicheck.attacks import SignFlipAttack, fabricate_tail, poison_data
 from scicheck.baselines import fit_baselines
 from scicheck.config import DataConfig, JudgeConfig, TrainingConfig, load_config
 from scicheck.data import HIGGS_FEATURES, TaskData, load_task_data
-from scicheck.judge import sliding_windows, train_judge, validate, windows_to_timeline
+from scicheck.judge import replay_fraction, sliding_windows, train_judge, validate, windows_to_timeline
 from scicheck.models import ARCHS, build_for_target, count_params, tracked_layers
+from scicheck.report import table_vi
 from scicheck.snapshots import ETA_COL, SnapshotRecorder, feature_names
-from scicheck.training import augment_images, train_run
+from scicheck.training import augment_images, train_run, verifier_steps
 
 SIZES = [4000, 6000, 8000, 10000, 12000]
 
@@ -128,7 +130,7 @@ def test_end_to_end_on_synthetic_data():
 
 
 def test_configs_load():
-    for path in ("configs/paper.yaml", "configs/smoke.yaml", "configs/datasplit.yaml"):
+    for path in ("configs/paper.yaml", "configs/smoke.yaml", "configs/datasplit.yaml", "configs/stepablation.yaml"):
         load_config(path)
 
 
@@ -137,6 +139,39 @@ def test_datasplit_inherits_paper_design():
     assert split.train_frac == 1.0 and split.sizes == [300000] and split.out_dir == "results/datasplit"
     assert split.training == paper.training and split.data == paper.data and split.judge == paper.judge
     assert (split.attacks, split.severities, split.n_honest) == (paper.attacks, paper.severities, paper.n_honest)
+
+
+def test_paper_design_matches_revision_plan():
+    cfg = load_config("configs/paper.yaml")
+    assert (cfg.n_honest, cfg.n_malicious, cfg.severities) == (15, 5, [0.1, 0.3, 0.5])
+    assert (cfg.performance.n_honest, cfg.performance.n_malicious) == (2, 2)
+    assert cfg.verifier_steps == "match" and cfg.validate.replay
+
+
+def test_table_vi_compares_retraining_with_verification(tmp_path):
+    perf = tmp_path / "performance"
+    perf.mkdir()
+    pd.DataFrame([dict(arch="mlp", target_size=100000, seed=0, retrain_s=60.0, verify_s=70.0),
+                  dict(arch="mlp", target_size=200000, seed=0, retrain_s=62.0, verify_s=73.0)]
+                 ).to_csv(perf / "runtime_mlp.csv", index=False)
+    pd.DataFrame([dict(arch="mlp", target_size=100000, seed=0, peak_mb=900.0),
+                  dict(arch="mlp", target_size=200000, seed=0, peak_mb=950.0)]
+                 ).to_csv(perf / "memory_mlp.csv", index=False)
+    t = table_vi(tmp_path, ["mlp", "cnn"])
+    assert list(t.index) == ["100k", "200k"]
+    assert t[("Retraining (s)", "MLP")].tolist() == [60.0, 62.0]
+    assert t[("SciCheck verification (s)", "MLP")].tolist() == [70.0, 73.0]
+    assert t[("Peak memory per model (MB)", "MLP")].tolist() == [900.0, 950.0]
+
+
+def test_stepablation_differs_from_main_only_in_verifier_steps():
+    paper, abl = load_config("configs/paper.yaml"), load_config("configs/stepablation.yaml")
+    assert paper.verifier_steps == "match" and abl.verifier_steps == "epochs"
+    assert abl.sizes == [300000] and abl.out_dir == "results/stepablation"
+    assert abl.train_frac == paper.train_frac == 0.3
+    assert (abl.training, abl.data, abl.judge, abl.validate) == (paper.training, paper.data, paper.judge, paper.validate)
+    assert (abl.attacks, abl.severities, abl.n_honest, abl.n_malicious) == (
+        paper.attacks, paper.severities, paper.n_honest, paper.n_malicious)
 
 
 def test_task_data_splits_are_disjoint_and_nested():
@@ -177,6 +212,38 @@ def test_train_run_logs_held_out_loss_per_epoch():
     assert all(np.isfinite(h["eval_loss"]) and 0 <= h["eval_acc"] <= 1 for h in r.history)
     plain = train_run("mlp", 8, X[:200], y[:200], TrainingConfig(epochs=3), seed=0, device=torch.device("cpu"))
     np.testing.assert_array_equal(r.snapshots, plain.snapshots)
+
+
+def test_verifier_matches_scientist_step_count():
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(200, HIGGS_FEATURES)).astype(np.float32)
+    y = (X[:, 0] > 0).astype(np.float32)
+    tcfg = TrainingConfig(epochs=3, batch_size=32)
+    steps = verifier_steps("match", tcfg, n_scientist_rows=200)
+    assert steps == 3 * 7 and verifier_steps("epochs", tcfg, 200) is None
+    with pytest.raises(ValueError):
+        verifier_steps("same", tcfg, 200)
+    sci = train_run("mlp", 8, X, y, tcfg, seed=0, device=torch.device("cpu"))
+    ver = train_run("mlp", 8, X[:60], y[:60], tcfg, seed=1, device=torch.device("cpu"), steps=steps)
+    assert len(ver.snapshots) == len(sci.snapshots) == steps
+
+
+def test_replay_check_rejects_fabricated_run():
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(200, HIGGS_FEATURES)).astype(np.float32)
+    y = (X[:, 0] > 0).astype(np.float32)
+    dev = torch.device("cpu")
+    tcfg = TrainingConfig(epochs=4, batch_size=32)
+    spe = 7
+    ver = train_run("mlp", 8, X[:120], y[:120], tcfg, seed=1, device=dev, steps=4 * spe)
+    judge = train_judge(ver.snapshots, JudgeConfig(window=4, epochs=1, patience=1), rho=0.4, device=dev, seed=0)
+    honest = train_run("mlp", 8, X, y, tcfg, seed=2, device=dev)
+    fake = train_run("mlp", 8, X, y, tcfg, seed=3, device=dev, attack="fabricate", severity=0.5)
+    assert replay_fraction(judge.normalize(honest.snapshots), spe, 0.02) <= 0.05
+    assert replay_fraction(judge.normalize(fake.snapshots), spe, 0.02) == pytest.approx(14 / 21)
+    v = validate(judge, fake.snapshots, theta=1.0, steps_per_epoch=spe)
+    assert not v.replay_pass and not v.accept
+    assert validate(judge, fake.snapshots, theta=1.0).replay_pass
 
 
 def test_poison_data_flips_labels_or_inverts_images():

@@ -56,6 +56,16 @@ def evaluate(model: nn.Module, X: torch.Tensor, y: torch.Tensor, task: str, loss
     return res
 
 
+def verifier_steps(mode: str, cfg: TrainingConfig, n_scientist_rows: int) -> int | None:
+    """Optimizer steps for the verifier: "match" gives it the scientist's step count on its smaller
+    data slice, "epochs" trains it for the same number of epochs (fewer steps when train_frac < 1)."""
+    if mode == "epochs":
+        return None
+    if mode == "match":
+        return cfg.epochs * -(-n_scientist_rows // cfg.batch_size)
+    raise ValueError(f"verifier_steps must be 'match' or 'epochs', got {mode!r}")
+
+
 def train_run(
     arch: str,
     width: int,
@@ -67,7 +77,9 @@ def train_run(
     attack: str | None = None,
     severity: float = 0.0,
     eval_data: tuple[np.ndarray, np.ndarray] | None = None,
+    steps: int | None = None,
 ) -> RunResult:
+    """Train for cfg.epochs epochs, or for exactly `steps` optimizer steps when given."""
     if attack is not None and attack not in ATTACKS:
         raise ValueError(f"unknown attack {attack!r}, expected one of {ATTACKS}")
     spec = ARCHS[arch]
@@ -87,7 +99,8 @@ def train_run(
     Xe, ye = to_tensors(*eval_data, device) if eval_data is not None else (None, None)
     n, bs = len(Xt), cfg.batch_size
     steps_per_epoch = -(-n // bs)
-    n_steps = cfg.epochs * steps_per_epoch
+    n_steps = cfg.epochs * steps_per_epoch if steps is None else steps
+    n_epochs = -(-n_steps // steps_per_epoch)
     stop = int(round((1.0 - severity) * n_steps)) if attack == "fabricate" else n_steps
     if attack == "fabricate" and not steps_per_epoch <= stop < n_steps:
         raise ValueError(f"fabricate severity {severity} must leave at least one genuine epoch")
@@ -98,7 +111,7 @@ def train_run(
     eval_seconds = 0.0
 
     with Timer(device) as t:
-        for epoch in range(cfg.epochs):
+        for epoch in range(n_epochs):
             if step >= stop:
                 break
             perm = torch.randperm(n, generator=batch_gen).to(device)
