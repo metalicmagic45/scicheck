@@ -159,10 +159,26 @@ TABLE_VI = (
 )
 
 
+TABLE_STORAGE = (
+    ("runtime*.csv", "keep_all_mb", "Every checkpoint kept (MB)"),
+    ("runtime*.csv", "keep_all_weights_mb", "Every checkpoint kept, weights only (MB)"),
+    ("runtime*.csv", "bounded_peak_mb", "One epoch at a time, peak (MB)"),
+    ("runtime*.csv", "submitted_mb", "Sent to the verifier (MB)"),
+)
+
+
 def table_vi(out: Path, archs) -> pd.DataFrame | None:
+    return _perf_table(out, archs, TABLE_VI)
+
+
+def table_storage(out: Path, archs) -> pd.DataFrame | None:
+    return _perf_table(out, archs, TABLE_STORAGE)
+
+
+def _perf_table(out: Path, archs, specs) -> pd.DataFrame | None:
     perf = out / "performance"
     frames = []
-    for pattern, col, label in TABLE_VI:
+    for pattern, col, label in specs:
         files = sorted(perf.glob(pattern))
         d = pd.concat([pd.read_csv(f) for f in files]) if files else None
         if d is not None and col in d:
@@ -381,6 +397,20 @@ def build_report(cfg: Config) -> Path:
                "its own process on CPU. Spot-check peak memory: the verifier re-running the sampled segments of its "
                "own run and of every submission. Raw per-stage numbers are in `performance/`.", "",
                to_markdown(t6, "{:,.2f}"), ""]
+
+    ts = table_storage(out, cfg.architectures)
+    if ts is not None:
+        ts.to_csv(rep / "table_checkpoint_storage.csv")
+        v = cfg.validate
+        md += ["## Checkpoint storage", "",
+               f"What the scientist stores over one run to back the spot-check, with a checkpoint every {v.spot_steps} "
+               "steps (weights, Adam state, augmentation state) and the batch indices. Sizes are measured from a real "
+               "checkpoint of an honest run and multiplied by the number of checkpoints. Every checkpoint kept: all of "
+               "them until the run is verified, as in Proof-of-Learning; the weights-only column drops the optimizer "
+               "state. One epoch at a time: the epoch's checkpoints before its Merkle root is committed and the "
+               f"unsampled ones deleted, plus the {v.spot_segments} sampled segments kept so far. Sent to the "
+               "verifier: those sampled segments. Hashes and Merkle paths are a few kilobytes and left out.", "",
+               to_markdown(ts, "{:,.1f}"), ""]
 
     (rep / "report.md").write_text("\n".join(md), encoding="utf-8")
     return rep / "report.md"

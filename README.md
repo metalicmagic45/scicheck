@@ -90,8 +90,8 @@ Everything is written to the config's `out_dir` (e.g. `results/paper/`):
 | `runs.csv` | one row per scientist run: role, attack, severity, phi, eta_s, psi, each check's result, accept (statistical layer only; the report combines it with the spot-check), the baselines' phi_iforest / phi_ocsvm, spot-check error / result / time, final held-out loss |
 | `units/<arch>_<size>_s<seed>/` | that unit's runs, judge (`judge.pt`), snapshots, training diagnostics (`meta.json`) |
 | `units/.../history.csv` | train and held-out loss (and accuracy) after every epoch of every run |
-| `performance/` | per (arch, size): retraining time vs SciCheck verification time (verifier, judge fit, spot-check calibration, scoring and spot-checking one submission), and peak memory of each stage, the spot-check included |
-| `report/report.md` | Tables IV-VI, Figure 2, baselines vs ablation, θ/ρ sensitivity, overfitting table and gap plot, plus CSV/PNG of each |
+| `performance/` | per (arch, size): retraining time vs SciCheck verification time (verifier, judge fit, spot-check calibration, scoring and spot-checking one submission), peak memory of each stage, the spot-check included, and the checkpoint storage of keeping every checkpoint vs one epoch at a time |
+| `report/report.md` | Tables IV-VI, checkpoint storage, Figure 2, baselines vs ablation, θ/ρ sensitivity, overfitting table and gap plot, plus CSV/PNG of each |
 
 For reference, the original paper's 4k-12k sign-flip runs: the MLP and CNN rejected nearly all
 malicious runs at flip ≥ 0.3 and missed many at 0.1, and the autoencoder rejected most honest runs as

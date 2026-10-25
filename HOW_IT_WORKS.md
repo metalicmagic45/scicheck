@@ -56,6 +56,15 @@ keeps those checkpoints and deletes the rest. At most one epoch of checkpoints i
 The experiment picks the segments when each run starts and keeps only their checkpoints in memory,
 which is statistically the same because no attack depends on which segments are picked.
 
+The runtime sweep measures what this saves. It takes a real checkpoint from an honest run (weights,
+Adam state, augmentation state), measures its size in bytes, and multiplies by the number of
+checkpoints each scheme keeps. Keeping every checkpoint until the run is verified, as Proof-of-Learning
+does, stores one per segment for the whole run plus every batch index; it is reported with and without
+the optimizer state. Committing one epoch at a time stores at most one epoch's checkpoints and batch
+indices plus the sampled segments kept so far, and the verifier receives only those sampled segments.
+Hashes and Merkle paths are a few kilobytes and are left out. The report shows these totals in its
+checkpoint storage table.
+
 ## Experiments
 
 Three attacks cover the adversary model, each at severities 0.1, 0.3 and 0.5:
@@ -163,4 +172,5 @@ not bit-identical between runs (`deterministic: false`), but runs stay statistic
 | `baselines.py` | Isolation Forest and One-Class SVM baselines |
 | `anomaly_transformer.py`, `judge.py` | the judge: fitting it and accepting or rejecting a run, and the spot-check re-runs. The Anomaly Transformer is ported from Xu et al. (ICLR 2022), github.com/thuml/Anomaly-Transformer |
 | `experiments/`, `worker.py` | accuracy and performance sweeps |
+| `storage.py` | checkpoint storage: bytes of a real checkpoint, and the totals each storage scheme keeps |
 | `report.py` | tables and figures |

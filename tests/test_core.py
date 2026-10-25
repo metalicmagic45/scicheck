@@ -11,9 +11,10 @@ from scicheck.data import HIGGS_FEATURES, TaskData, load_task_data
 from scicheck.judge import (replay_fraction, sliding_windows, spot_errors, spot_tolerance, train_judge, validate,
                             windows_to_timeline)
 from scicheck.models import ARCHS, build_for_target, count_params, tracked_layers
-from scicheck.report import decide, default_variant, table_vi
+from scicheck.report import decide, default_variant, table_storage, table_vi
 from scicheck.snapshots import ETA_COL, SnapshotRecorder, feature_names
-from scicheck.training import augment_images, plan_segments, train_run, verifier_steps
+from scicheck.storage import MB, checkpoint_bytes, checkpoint_storage, segment_bytes, tensor_bytes
+from scicheck.training import Segment, augment_images, plan_segments, train_run, verifier_steps
 
 SIZES = [4000, 6000, 8000, 10000, 12000]
 
@@ -156,6 +157,40 @@ def test_paper_design_matches_revision_plan():
     assert (cfg.performance.n_honest, cfg.performance.n_malicious) == (2, 2)
     assert cfg.verifier_steps == "match" and cfg.validate.replay
     assert (cfg.validate.spot_segments, cfg.validate.spot_steps) == (10, 50)
+
+
+def test_checkpoint_storage_totals():
+    opt = {"state": {0: {"step": torch.tensor(1.0), "exp_avg": torch.zeros(10), "exp_avg_sq": torch.zeros(10)}},
+           "param_groups": [{"lr": 0.001, "params": [0]}]}
+    seg = Segment(0, {"w": torch.zeros(10)}, opt, None, [torch.zeros(4, dtype=torch.int64)] * 2, torch.zeros(10))
+    assert checkpoint_bytes(seg) == 40 + 84 and segment_bytes(seg) == 124 + 64 + 40
+    s = checkpoint_storage(seg, n_steps=6, n_rows=8, batch_size=4, seg_steps=2, n_kept=1)
+    assert s["keep_all_mb"] * MB == pytest.approx(4 * 124 + 24 * 8)
+    assert s["keep_all_weights_mb"] * MB == pytest.approx(4 * 40 + 24 * 8)
+    assert s["bounded_peak_mb"] * MB == pytest.approx(2 * 124 + 8 * 8 + 228)
+    assert s["submitted_mb"] * MB == pytest.approx(228)
+
+
+def test_real_checkpoint_holds_weights_and_adam_state():
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(200, HIGGS_FEATURES)).astype(np.float32)
+    y = (X[:, 0] > 0).astype(np.float32)
+    r = train_run("mlp", 8, X, y, TrainingConfig(epochs=1, batch_size=32), seed=0, device=torch.device("cpu"),
+                  spot=(1, 3, 0))
+    seg = r.segments[0]
+    assert tensor_bytes(seg.model_state) == r.n_params * 4
+    assert checkpoint_bytes(seg) >= 3 * r.n_params * 4
+    assert segment_bytes(seg) == checkpoint_bytes(seg) + 3 * 32 * 8 + r.n_params * 4
+
+
+def test_table_storage_reads_runtime_sweep(tmp_path):
+    perf = tmp_path / "performance"
+    perf.mkdir()
+    pd.DataFrame([dict(arch="mlp", target_size=100000, seed=0, keep_all_mb=4000.0, keep_all_weights_mb=1300.0,
+                       bounded_peak_mb=170.0, submitted_mb=60.0)]).to_csv(perf / "runtime_mlp.csv", index=False)
+    t = table_storage(tmp_path, ["mlp"])
+    assert t.loc["100k", ("Every checkpoint kept (MB)", "MLP")] == 4000.0
+    assert t.loc["100k", ("One epoch at a time, peak (MB)", "MLP")] == 170.0
 
 
 def test_table_vi_compares_retraining_with_verification(tmp_path):

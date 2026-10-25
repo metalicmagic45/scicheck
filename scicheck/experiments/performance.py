@@ -15,6 +15,7 @@ from ..config import Config
 from ..data import load_task_data
 from ..judge import spot_errors, spot_tolerance, train_judge, validate
 from ..models import ARCHS, width_for_target
+from ..storage import checkpoint_storage
 from ..training import train_run, verifier_steps
 from ..utils import Timer, derive_seed, resolve_device
 from .common import check_or_write_config, spot_plan
@@ -47,14 +48,21 @@ def runtime_cell(cfg: Config, arch: str, size: int, seed: int, device: torch.dev
     ver_seed = derive_seed("perf-verifier", arch, size, seed)
     ver = train_run(arch, width, *data.verifier, cfg.training, ver_seed, device,
                     steps=verifier_steps(cfg.verifier_steps, cfg.training, data.n_train), spot=spot_plan(cfg, ver_seed))
-    sci_seconds, honest_seconds, submissions = 0.0, [], []
+    sci_seconds, honest_seconds, submissions, honest_segment = 0.0, [], [], None
     for role, flip, _i, run_seed in _scientist_jobs(cfg, arch, size, seed):
         r = train_run(arch, width, *data.scientist, cfg.training, run_seed, device,
                       "signflip" if flip > 0 else None, flip, spot=spot_plan(cfg, run_seed))
         sci_seconds += r.seconds
         if role == "honest":
             honest_seconds.append(r.seconds)
+            if honest_segment is None and r.segments:
+                honest_segment = r.segments[0]
         submissions.append(r)
+    storage = {}
+    if honest_segment is not None:
+        bs = cfg.training.batch_size
+        storage = checkpoint_storage(honest_segment, cfg.training.epochs * -(-data.n_train // bs), data.n_train,
+                                     bs, cfg.validate.spot_steps, cfg.validate.spot_segments)
     with Timer(device) as tj:
         judge = train_judge(ver.snapshots, cfg.judge, cfg.validate.rho, device,
                             derive_seed("perf-judge", arch, size, seed))
@@ -78,7 +86,8 @@ def runtime_cell(cfg: Config, arch: str, size: int, seed: int, device: torch.dev
                 judge_train_s=tj.seconds, score_s=score_s, spot_calib_s=calib_s, spot_s=spot_s,
                 retrain_s=sum(honest_seconds) / len(honest_seconds) if honest_seconds else float("nan"),
                 verify_s=ver.seconds + tj.seconds + score_s + calib_s + spot_s,
-                total_s=ver.seconds + sci_seconds + tj.seconds + ts.seconds + calib_s + spot_s * len(submissions))
+                total_s=ver.seconds + sci_seconds + tj.seconds + ts.seconds + calib_s + spot_s * len(submissions),
+                **storage)
 
 
 def run_runtime(cfg: Config, device: torch.device) -> None:
@@ -95,7 +104,9 @@ def run_runtime(cfg: Config, device: torch.device) -> None:
                 _append(csv, row)
                 print(f"[runtime {arch} {size} s{seed}] retraining {row['retrain_s']:.1f}s vs SciCheck "
                       f"{row['verify_s']:.1f}s (M0 {row['verifier_s']:.1f} + J {row['judge_train_s']:.1f} "
-                      f"+ score {row['score_s']:.1f} + spot-check {row['spot_calib_s'] + row['spot_s']:.1f})",
+                      f"+ score {row['score_s']:.1f} + spot-check {row['spot_calib_s'] + row['spot_s']:.1f})"
+                      + (f" | checkpoints {row['keep_all_mb']:.0f} MB kept all vs {row['bounded_peak_mb']:.0f} MB "
+                         f"one epoch at a time" if "keep_all_mb" in row else ""),
                       flush=True)
 
 
