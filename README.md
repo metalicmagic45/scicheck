@@ -43,8 +43,9 @@ GPUS=0 jobs/run_all.sh            # GPUS=0,1,2 spreads the three architectures o
 ```
 
 `jobs/run_all.sh` downloads the data, then runs the main experiment (one job per architecture)
-alongside the memory sweep (CPU only, the longest step), then the data-split control, then the
-runtime sweep on its own so nothing else skews its timings, and finally both reports. Progress is
+alongside the memory sweep (CPU only, the longest step), then the data-split control and the
+step-matching ablation, then the runtime sweep on its own so nothing else skews its timings, and
+finally the three reports. Progress is
 printed as each step starts and finishes; each step's output is in `logs/<step>.log`. `WORKERS`
 (default 4) sets the worker processes per accuracy job. Each step can also be run by hand:
 

@@ -8,6 +8,18 @@ WORKERS=${WORKERS:-4}
 mkdir -p logs
 trap 'trap - INT TERM; kill 0' INT TERM
 
+python -c '
+import sys, torch
+gpus = ",".join(sys.argv[1:])
+need = max(map(int, sys.argv[1:])) + 1
+have = torch.cuda.device_count() if torch.cuda.is_available() else 0
+print(f"python {sys.executable}, torch {torch.__version__} (CUDA {torch.version.cuda}), {have} GPU(s) visible")
+if have < need:
+    sys.exit(f"GPU check failed: GPUS={gpus} needs {need} GPU(s) but torch sees {have}.\n"
+             "Activate the venv from the README Setup, and install a torch build whose CUDA version "
+             "this machine'"'"'s driver supports (nvidia-smi shows the highest).")
+' "${GPU_LIST[@]}"
+
 declare -A PIDS
 
 start() {
@@ -24,6 +36,7 @@ finish() {
             echo "$(date '+%F %T') done   $name"
         else
             echo "$(date '+%F %T') FAILED $name, see logs/$name.log" >&2
+            tail -n 15 "logs/$name.log" | sed 's/^/    /' >&2
             failed=1
         fi
     done
