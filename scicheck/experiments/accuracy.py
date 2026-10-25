@@ -12,11 +12,11 @@ from ..attacks import ATTACKS
 from ..baselines import fit_baselines
 from ..config import Config
 from ..data import load_task_data
-from ..judge import train_judge, validate
+from ..judge import spot_errors, spot_tolerance, train_judge, validate
 from ..models import ARCHS, width_for_target
 from ..training import train_run, verifier_steps
 from ..utils import Timer, derive_seed, resolve_device, write_json
-from .common import check_or_write_config, run_jobs
+from .common import check_or_write_config, run_jobs, spot_plan
 
 
 def _last(r, key: str) -> float:
@@ -39,8 +39,9 @@ def run_unit(cfg: Config, arch: str, size: int, seed: int, device: torch.device)
     data = load_task_data(spec.dataset, cfg.data_dir, cfg.train_frac, cfg.data_seed, cfg.data)
     width = width_for_target(arch, size)
 
-    ver = train_run(arch, width, *data.verifier, cfg.training, derive_seed("verifier", arch, size, seed), device,
-                    eval_data=data.test, steps=verifier_steps(cfg.verifier_steps, cfg.training, data.n_train))
+    ver_seed = derive_seed("verifier", arch, size, seed)
+    ver = train_run(arch, width, *data.verifier, cfg.training, ver_seed, device, eval_data=data.test,
+                    steps=verifier_steps(cfg.verifier_steps, cfg.training, data.n_train), spot=spot_plan(cfg, ver_seed))
     with Timer(device) as tj:
         judge = train_judge(ver.snapshots, cfg.judge, cfg.validate.rho, device,
                             derive_seed("judge", arch, size, seed))
@@ -51,23 +52,33 @@ def run_unit(cfg: Config, arch: str, size: int, seed: int, device: torch.device)
     with Timer() as tb:
         baselines = fit_baselines(ver.snapshots, judge, cfg.judge, derive_seed("baselines", arch, size, seed))
 
+    vcfg = cfg.validate
+    spot = vcfg.spot_segments > 0
+    if spot:
+        ver_err = spot_errors(arch, width, *data.verifier, ver.segments, cfg.training, device)
+        delta = spot_tolerance(ver_err, vcfg.spot_margin, vcfg.spot_floor)
+
     base = dict(arch=arch, target_size=size, n_params=ver.n_params, width=width, seed=seed,
-                tau=judge.tau, eta_v=judge.eta_v, gamma=judge.gamma)
+                tau=judge.tau, eta_v=judge.eta_v, gamma=judge.gamma, **({"spot_delta": delta} if spot else {}))
     rows, snaps = [], {"verifier": ver.snapshots}
     history = [dict(role="verifier", attack="none", severity=0.0, run_idx=0, **h) for h in ver.history]
-    vcfg = cfg.validate
     spe = -(-data.n_train // cfg.training.batch_size) if vcfg.replay else None
 
     def scientist(attack: str | None, severity: float, idx: int, run_seed: int) -> None:
         r = train_run(arch, width, *data.scientist, cfg.training, run_seed, device, attack, severity,
-                      eval_data=data.test)
+                      eval_data=data.test, spot=spot_plan(cfg, run_seed))
         v = validate(judge, r.snapshots, vcfg.theta, spe, vcfg.replay_tol, vcfg.psi_max)
+        spot_cols = {}
+        if spot:
+            with Timer(device) as ts:
+                err = spot_errors(arch, width, *data.scientist, r.segments, cfg.training, device)
+            spot_cols = dict(spot_err=float(err.max()), spot_pass=bool(err.max() <= delta), spot_seconds=ts.seconds)
         role, attack = ("malicious", attack) if attack else ("honest", "none")
         rows.append(dict(base, role=role, attack=attack, severity=severity, run_idx=idx, run_seed=run_seed,
                          n_snapshots=len(r.snapshots), final_loss=r.final_loss,
                          eval_loss=_last(r, "eval_loss"), eval_acc=_last(r, "eval_acc"), train_seconds=r.seconds,
                          phi=v.phi, eta_s=v.eta_s, at_pass=v.at_pass, eta_pass=v.eta_pass, accept=v.accept,
-                         **({"psi": v.psi, "replay_pass": v.replay_pass} if spe else {}),
+                         **({"psi": v.psi, "replay_pass": v.replay_pass} if spe else {}), **spot_cols,
                          **{f"phi_{k}": b.phi(judge, r.snapshots) for k, b in baselines.items()}))
         history.extend(dict(role=role, attack=attack, severity=severity, run_idx=idx, **h) for h in r.history)
         if cfg.save_snapshots:
@@ -92,6 +103,7 @@ def run_unit(cfg: Config, arch: str, size: int, seed: int, device: torch.device)
                                        data_rows_scientist=data.n_train, data_rows_verifier=data.n_verifier,
                                        data_rows_test=len(data.X) - data.n_train, judge_seconds=tj.seconds,
                                        baseline_seconds=tb.seconds,
+                                       **({"spot_verifier_err": float(ver_err.max())} if spot else {}),
                                        **{f"tau_{k}": b.tau for k, b in baselines.items()},
                                        unit_seconds=time.perf_counter() - t0, **judge.diagnostics))
     tmp = out / "runs.csv.tmp"
@@ -100,8 +112,12 @@ def run_unit(cfg: Config, arch: str, size: int, seed: int, device: torch.device)
 
     h, m = df[df.role == "honest"], df[df.role == "malicious"]
     per_attack = ", ".join(f"{a} {(~g.accept).sum()}/{len(g)}" for a, g in m.groupby("attack", sort=False))
-    return (f"{tag} done in {time.perf_counter() - t0:.0f}s | honest rejected {(~h.accept).sum()}/{len(h)} | "
-            f"malicious rejected {per_attack}")
+    msg = (f"{tag} done in {time.perf_counter() - t0:.0f}s | honest rejected {(~h.accept).sum()}/{len(h)} | "
+           f"malicious rejected {per_attack}")
+    if spot:
+        per_attack = ", ".join(f"{a} {(~g.spot_pass).sum()}/{len(g)}" for a, g in m.groupby("attack", sort=False))
+        msg += f" | spot-check rejected honest {(~h.spot_pass).sum()}/{len(h)}, {per_attack}"
+    return msg
 
 
 def run_accuracy(cfg: Config, workers: int = 1, devices: list[str] | None = None,

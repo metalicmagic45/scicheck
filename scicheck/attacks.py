@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 ATTACKS = ("signflip", "data", "fabricate")
+FABRICATE_NOISE = 0.1
 
 
 class SignFlipAttack:
@@ -37,8 +38,13 @@ def poison_data(X: np.ndarray, y: np.ndarray, task: str, frac: float, seed: int)
     return X, y
 
 
-def fabricate_tail(snapshots: np.ndarray, n_total: int, steps_per_epoch: int) -> np.ndarray:
+def fabricate_tail(snapshots: np.ndarray, n_total: int, steps_per_epoch: int, noise: float = 0.0,
+                   seed: int = 0) -> np.ndarray:
     tail = snapshots[-steps_per_epoch:]
     missing = n_total - len(snapshots)
     reps = -(-missing // len(tail))
-    return np.concatenate([snapshots, np.tile(tail, (reps, 1))[:missing]])
+    fake = np.tile(tail, (reps, 1))[:missing]
+    if noise > 0:
+        jitter = np.diff(snapshots, axis=0).std(0)
+        fake = fake + np.random.default_rng(seed).normal(size=fake.shape) * noise * jitter
+    return np.concatenate([snapshots, fake.astype(snapshots.dtype)])

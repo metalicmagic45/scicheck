@@ -35,3 +35,5 @@ performance:
 
 validate:
   replay: true
+  spot_segments: 3
+  spot_steps: 10

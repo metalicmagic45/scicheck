@@ -8,12 +8,17 @@ import torch
 
 from .config import DataConfig, JudgeConfig, TrainingConfig
 from .data import load_task_data
-from .judge import train_judge, validate
+from .judge import spot_errors, spot_tolerance, train_judge, validate
 from .models import ARCHS
 from .training import train_run, verifier_steps
 from .utils import peak_rss_mb
 
 RESULT_PREFIX = "SCICHECK_RESULT "
+
+
+def _data(job: dict):
+    return load_task_data(ARCHS[job["arch"]].dataset, job["data_dir"], job["train_frac"], job["data_seed"],
+                          DataConfig(**job["data"]))
 
 
 def main(job_path: str) -> None:
@@ -23,21 +28,31 @@ def main(job_path: str) -> None:
     result: dict = {}
 
     if job["stage"] == "train":
-        data = load_task_data(ARCHS[job["arch"]].dataset, job["data_dir"], job["train_frac"], job["data_seed"],
-                              DataConfig(**job["data"]))
+        data = _data(job)
         is_verifier = job["partition"] == "verifier"
         X, y = data.verifier if is_verifier else data.scientist
         tcfg = TrainingConfig(**job["training"])
         steps = verifier_steps(job["verifier_steps"], tcfg, data.n_train) if is_verifier else None
         r = train_run(job["arch"], job["width"], X, y, tcfg,
-                      job["seed"], device, "signflip" if job["flip"] > 0 else None, job["flip"], steps=steps)
+                      job["seed"], device, "signflip" if job["flip"] > 0 else None, job["flip"], steps=steps,
+                      spot=tuple(job["spot"]) if job.get("spot") else None)
         np.save(job["out"], r.snapshots)
+        if r.segments:
+            torch.save(r.segments, job["segments"])
         result = dict(seconds=r.seconds, n_params=r.n_params, n_snapshots=len(r.snapshots))
     elif job["stage"] == "judge":
         cfg = JudgeConfig(**{**job["judge"], "split": tuple(job["judge"]["split"])})
         judge = train_judge(np.load(job["verifier"]), cfg, job["rho"], device, job["seed"])
         for path in job["submissions"]:
             validate(judge, np.load(path), job["theta"])
+    elif job["stage"] == "spot":
+        data = _data(job)
+        tcfg = TrainingConfig(**job["training"])
+        load = lambda path: torch.load(path, weights_only=False)
+        errors = spot_errors(job["arch"], job["width"], *data.verifier, load(job["verifier"]), tcfg, device)
+        spot_tolerance(errors, job["margin"], job["floor"])
+        for path in job["submissions"]:
+            spot_errors(job["arch"], job["width"], *data.scientist, load(path), tcfg, device)
     else:
         raise ValueError(f"unknown stage {job['stage']!r}")
 

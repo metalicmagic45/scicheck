@@ -5,10 +5,10 @@ device: auto
 deterministic: false
 
 architectures: [mlp, cnn, ae]
-sizes: [100000, 200000, 300000, 400000, 500000]
+sizes: [100000, 300000, 500000]
 attacks: [signflip, data, fabricate]
 severities: [0.1, 0.3, 0.5]
-seeds: [0]
+seeds: [0, 1, 2]
 n_honest: 15
 n_malicious: 5
 train_frac: 0.3
@@ -51,6 +51,8 @@ validate:
   theta: 0.3
   rho: 0.4
   replay: true
+  spot_segments: 10
+  spot_steps: 50
 
 performance:
   n_honest: 2

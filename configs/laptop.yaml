@@ -1,0 +1,6 @@
+base: paper.yaml
+name: laptop
+out_dir: results/laptop
+sizes: [100000]
+severities: [0.3]
+seeds: [0]

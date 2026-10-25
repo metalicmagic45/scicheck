@@ -12,9 +12,11 @@ from .experiments.accuracy import collect_runs
 ARCH_LABEL = {"mlp": "MLP", "cnn": "CNN", "ae": "AE"}
 SEVERITY_COLORS = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"]
 ATTACK_COLORS = {"signflip": "#2a78d6", "data": "#d97a1f", "fabricate": "#3a9a5b"}
-ATTACK_LABEL = {"signflip": "Sign flip", "data": "Unauthorized data", "fabricate": "Fabricated run"}
+ATTACK_LABEL = {"signflip": "Sign flip", "data": "Label poisoning", "fabricate": "Fabricated run"}
 PHI_COL = {"at": "phi", "iforest": "phi_iforest", "ocsvm": "phi_ocsvm"}
 CHECKS = {
+    "at+eta+replay+spot": "SciCheck + replay + spot-check",
+    "spot": "Spot-check only",
     "at+eta+replay": "SciCheck + replay",
     "replay": "Replay only",
     "at+eta": "SciCheck (AT + η)",
@@ -42,18 +44,20 @@ def decide(df: pd.DataFrame, theta: float, rho: float, variant: str = "at+eta") 
             passed &= df.eta_s >= rho * df.eta_v
         elif check == "replay":
             passed &= df.replay_pass.astype(bool)
+        elif check == "spot":
+            passed &= df.spot_pass.astype(bool)
         else:
             passed &= df[PHI_COL[check]] <= theta
     return passed
 
 
 def has_checks(cells: pd.DataFrame, variant: str) -> bool:
-    cols = {"eta": "eta_s", "replay": "replay_pass", **PHI_COL}
+    cols = {"eta": "eta_s", "replay": "replay_pass", "spot": "spot_pass", **PHI_COL}
     return all(cols[c] in cells for c in variant.split("+"))
 
 
 def default_variant(cells: pd.DataFrame) -> str:
-    return "at+eta+replay" if "replay_pass" in cells else "at+eta"
+    return "+".join(["at", "eta"] + [c for c, col in (("replay", "replay_pass"), ("spot", "spot_pass")) if col in cells])
 
 
 def expand_cells(df: pd.DataFrame) -> pd.DataFrame:
@@ -149,7 +153,9 @@ def sensitivity(cells: pd.DataFrame, archs) -> pd.DataFrame:
 TABLE_VI = (
     ("runtime*.csv", "retrain_s", "Retraining (s)"),
     ("runtime*.csv", "verify_s", "SciCheck verification (s)"),
+    ("runtime*.csv", "spot_s", "Spot-check per submission (s)"),
     ("memory*.csv", "peak_mb", "Peak memory per model (MB)"),
+    ("memory*.csv", "spot_mb", "Spot-check peak memory (MB)"),
 )
 
 
@@ -311,8 +317,10 @@ def build_report(cfg: Config) -> Path:
     theta, rho = cfg.validate.theta, cfg.validate.rho
     md = [f"# SciCheck results: `{cfg.name}`", "",
           f"θ = {theta}, ρ = {rho}, r = {cfg.judge.r}, train_frac = {cfg.train_frac}, "
-          f"replay check {'on' if cfg.validate.replay else 'off'}. "
-          "Positive class = malicious (rejected).", ""]
+          f"replay check {'on' if cfg.validate.replay else 'off'}, "
+          f"spot-check {f'{cfg.validate.spot_segments} x {cfg.validate.spot_steps} steps' if cfg.validate.spot_segments else 'off'}. "
+          "Positive class = malicious (rejected). Tables IV-V, Figure 2 and the sensitivity grid use the full "
+          "decision: a run is accepted only if it passes every enabled check.", ""]
 
     try:
         runs = collect_runs(out)
@@ -321,6 +329,7 @@ def build_report(cfg: Config) -> Path:
     if runs is not None:
         archs = [a for a in cfg.architectures if a in set(runs.arch)]
         cells = expand_cells(runs)
+        cells["accept"] = decide(cells, theta, rho, default_variant(cells))
         n_units = runs.groupby(["arch", "target_size", "seed"]).ngroups
         md += [f"{len(runs)} trained scientist runs from {n_units} units; "
                f"{len(cells)} scored runs after giving each (attack, severity) cell its honest runs.", ""]
@@ -332,6 +341,11 @@ def build_report(cfg: Config) -> Path:
         sens.to_csv(rep / "sensitivity_theta_rho.csv", index=False)
         figure_2(cells, archs, rep / "fig2_f1_by_size.png")
         figure_sensitivity(sens, archs, theta, rho, rep / "sensitivity_theta_rho.png")
+        v = cfg.validate
+        spot_note = (f" The spot-check re-runs {v.spot_segments} randomly chosen committed segments of "
+                     f"{v.spot_steps} steps each on the committed data and rejects the run if any ends farther from "
+                     "its committed checkpoint than the tolerance δ calibrated on the verifier's own segments."
+                     if v.spot_segments else "")
         md += ["## Table IV - precision / recall / F1", "", to_markdown(t4), "",
                "## Table V - FalsePositive / FalseNegative (pooled counts)", "", to_markdown(t5), "",
                "## Figure 2 - F1 by model size and attack", "", "![fig2](fig2_f1_by_size.png)", "",
@@ -339,7 +353,7 @@ def build_report(cfg: Config) -> Path:
                "Every check uses the same verifier snapshots, τ at the (1 - r)-quantile of its validation "
                "scores, and ϕ ≤ θ. Isolation Forest and One-Class SVM score each snapshot on its own. "
                "The replay check rejects runs whose steps repeat the step one epoch earlier "
-               f"(ψ > {cfg.validate.psi_max}).", "",
+               f"(ψ > {cfg.validate.psi_max}).{spot_note}", "",
                to_markdown(comp), "",
                "## Sensitivity of FalsePositive / FalseNegative to (θ, ρ)", "",
                "Full grid in `sensitivity_theta_rho.csv`; the paper's operating point is outlined.", "",
@@ -361,9 +375,11 @@ def build_report(cfg: Config) -> Path:
         md += ["## Table VI - cost of verification vs retraining", "",
                "Retraining: one honest run of the blueprint on the full training data, the cost of checking a "
                "run by training it again. SciCheck verification: the verifier's reference run "
-               f"({cfg.train_frac:.0%} of the data, verifier_steps = {cfg.verifier_steps}), fitting the judge, and "
-               "scoring one submission. Peak memory: the most any single stage (verifier, one scientist, or judge) "
-               "needs, each measured in its own process on CPU. Raw per-stage numbers are in `performance/`.", "",
+               f"({cfg.train_frac:.0%} of the data, verifier_steps = {cfg.verifier_steps}), fitting the judge, "
+               "calibrating the spot-check tolerance, and scoring and spot-checking one submission. Peak memory: "
+               "the most any single stage (verifier, one scientist, judge, or spot-check) needs, each measured in "
+               "its own process on CPU. Spot-check peak memory: the verifier re-running the sampled segments of its "
+               "own run and of every submission. Raw per-stage numbers are in `performance/`.", "",
                to_markdown(t6, "{:,.2f}"), ""]
 
     (rep / "report.md").write_text("\n".join(md), encoding="utf-8")

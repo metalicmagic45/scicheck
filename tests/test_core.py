@@ -4,15 +4,16 @@ import pytest
 import torch
 
 from scicheck.anomaly_transformer import AnomalyTransformer, anomaly_scores
-from scicheck.attacks import SignFlipAttack, fabricate_tail, poison_data
+from scicheck.attacks import FABRICATE_NOISE, SignFlipAttack, fabricate_tail, poison_data
 from scicheck.baselines import fit_baselines
 from scicheck.config import DataConfig, JudgeConfig, TrainingConfig, load_config
 from scicheck.data import HIGGS_FEATURES, TaskData, load_task_data
-from scicheck.judge import replay_fraction, sliding_windows, train_judge, validate, windows_to_timeline
+from scicheck.judge import (replay_fraction, sliding_windows, spot_errors, spot_tolerance, train_judge, validate,
+                            windows_to_timeline)
 from scicheck.models import ARCHS, build_for_target, count_params, tracked_layers
-from scicheck.report import table_vi
+from scicheck.report import decide, default_variant, table_vi
 from scicheck.snapshots import ETA_COL, SnapshotRecorder, feature_names
-from scicheck.training import augment_images, train_run, verifier_steps
+from scicheck.training import augment_images, plan_segments, train_run, verifier_steps
 
 SIZES = [4000, 6000, 8000, 10000, 12000]
 
@@ -130,8 +131,16 @@ def test_end_to_end_on_synthetic_data():
 
 
 def test_configs_load():
-    for path in ("configs/paper.yaml", "configs/smoke.yaml", "configs/datasplit.yaml", "configs/stepablation.yaml"):
+    for path in ("configs/paper.yaml", "configs/smoke.yaml", "configs/datasplit.yaml", "configs/stepablation.yaml",
+                 "configs/laptop.yaml"):
         load_config(path)
+
+
+def test_laptop_is_paper_design_at_one_size_severity_and_seed():
+    paper, laptop = load_config("configs/paper.yaml"), load_config("configs/laptop.yaml")
+    assert (laptop.sizes, laptop.severities, laptop.seeds) == ([100000], [0.3], [0])
+    assert laptop.architectures == paper.architectures and laptop.attacks == paper.attacks
+    assert laptop.validate == paper.validate and laptop.training == paper.training
 
 
 def test_datasplit_inherits_paper_design():
@@ -146,6 +155,7 @@ def test_paper_design_matches_revision_plan():
     assert (cfg.n_honest, cfg.n_malicious, cfg.severities) == (15, 5, [0.1, 0.3, 0.5])
     assert (cfg.performance.n_honest, cfg.performance.n_malicious) == (2, 2)
     assert cfg.verifier_steps == "match" and cfg.validate.replay
+    assert (cfg.validate.spot_segments, cfg.validate.spot_steps) == (10, 50)
 
 
 def test_table_vi_compares_retraining_with_verification(tmp_path):
@@ -228,7 +238,7 @@ def test_verifier_matches_scientist_step_count():
     assert len(ver.snapshots) == len(sci.snapshots) == steps
 
 
-def test_replay_check_rejects_fabricated_run():
+def test_replay_check_catches_exact_replay_not_noisy_replay():
     rng = np.random.default_rng(0)
     X = rng.normal(size=(200, HIGGS_FEATURES)).astype(np.float32)
     y = (X[:, 0] > 0).astype(np.float32)
@@ -238,12 +248,14 @@ def test_replay_check_rejects_fabricated_run():
     ver = train_run("mlp", 8, X[:120], y[:120], tcfg, seed=1, device=dev, steps=4 * spe)
     judge = train_judge(ver.snapshots, JudgeConfig(window=4, epochs=1, patience=1), rho=0.4, device=dev, seed=0)
     honest = train_run("mlp", 8, X, y, tcfg, seed=2, device=dev)
-    fake = train_run("mlp", 8, X, y, tcfg, seed=3, device=dev, attack="fabricate", severity=0.5)
+    noisy = train_run("mlp", 8, X, y, tcfg, seed=3, device=dev, attack="fabricate", severity=0.5)
+    exact = fabricate_tail(noisy.snapshots[:14], 28, spe)
     assert replay_fraction(judge.normalize(honest.snapshots), spe, 0.02) <= 0.05
-    assert replay_fraction(judge.normalize(fake.snapshots), spe, 0.02) == pytest.approx(14 / 21)
-    v = validate(judge, fake.snapshots, theta=1.0, steps_per_epoch=spe)
+    assert replay_fraction(judge.normalize(noisy.snapshots), spe, 0.02) <= 0.05
+    assert replay_fraction(judge.normalize(exact), spe, 0.02) == pytest.approx(14 / 21)
+    v = validate(judge, exact, theta=1.0, steps_per_epoch=spe)
     assert not v.replay_pass and not v.accept
-    assert validate(judge, fake.snapshots, theta=1.0).replay_pass
+    assert validate(judge, exact, theta=1.0).replay_pass
 
 
 def test_poison_data_flips_labels_or_inverts_images():
@@ -263,6 +275,18 @@ def test_fabricate_tail_replays_last_epoch():
     np.testing.assert_array_equal(out[12:, 0], [8, 9, 10, 11, 8, 9, 10, 11])
 
 
+def test_fabricate_tail_noise_scales_with_step_jitter():
+    S = np.random.default_rng(0).normal(size=(12, 3)).astype(np.float32)
+    exact = fabricate_tail(S, n_total=20, steps_per_epoch=4)
+    noisy = fabricate_tail(S, n_total=20, steps_per_epoch=4, noise=0.1, seed=1)
+    assert noisy.dtype == S.dtype
+    np.testing.assert_array_equal(noisy[:12], S)
+    np.testing.assert_array_equal(noisy, fabricate_tail(S, 20, 4, noise=0.1, seed=1))
+    dev = noisy[12:] - exact[12:]
+    assert (dev != 0).all()
+    assert (np.abs(dev) < 0.5 * np.diff(S, axis=0).std(0)).all()
+
+
 def test_attacked_runs_keep_full_length():
     rng = np.random.default_rng(0)
     X = rng.normal(size=(320, HIGGS_FEATURES)).astype(np.float32)
@@ -273,7 +297,9 @@ def test_attacked_runs_keep_full_length():
     data = train_run("mlp", 8, X, y, tcfg, seed=0, device=dev, attack="data", severity=0.3)
     assert len(honest.snapshots) == len(fake.snapshots) == len(data.snapshots) == 40
     np.testing.assert_allclose(fake.snapshots[:20], honest.snapshots[:20], rtol=1e-5, atol=1e-7)
-    np.testing.assert_array_equal(fake.snapshots[20:30], fake.snapshots[10:20])
+    replayed = fake.snapshots[20:30] - fake.snapshots[10:20]
+    assert (replayed != 0).any()
+    assert (np.abs(replayed) <= 5 * FABRICATE_NOISE * np.diff(fake.snapshots[:20], axis=0).std(0)).all()
     with pytest.raises(ValueError):
         train_run("mlp", 8, X, y, tcfg, seed=0, device=dev, attack="fabricate", severity=0.9)
 
@@ -293,3 +319,70 @@ def test_baselines_flag_shifted_runs_more():
     broken[:30] = np.nan
     for b in bs.values():
         assert b.phi(judge, broken) >= 0.1
+
+
+def test_plan_segments_are_aligned_distinct_and_in_range():
+    starts = plan_segments(103, steps=10, n_segments=4, seed=0)
+    assert len(set(starts)) == 4 and all(s % 10 == 0 and s + 10 <= 103 for s in starts)
+    assert starts == plan_segments(103, 10, 4, seed=0)
+    assert len(plan_segments(25, 10, 9, seed=0)) == 2
+
+
+def test_spot_check_replays_honest_segments_exactly_and_rejects_attacks():
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(320, HIGGS_FEATURES)).astype(np.float32)
+    y = (X[:, 0] > 0).astype(np.float32)
+    tcfg, dev = TrainingConfig(epochs=4, batch_size=32), torch.device("cpu")
+    every = (8, 5, 0)
+    err = lambda r: spot_errors("mlp", 8, X, y, r.segments, tcfg, dev)
+    honest = train_run("mlp", 8, X, y, tcfg, seed=0, device=dev, spot=every)
+    assert [seg.start for seg in honest.segments] == list(range(0, 40, 5))
+    assert err(honest).max() < 1e-6
+    for attack in ("signflip", "data"):
+        r = train_run("mlp", 8, X, y, tcfg, seed=0, device=dev, attack=attack, severity=0.3, spot=every)
+        assert err(r).min() > 1e-3
+    fake = train_run("mlp", 8, X, y, tcfg, seed=0, device=dev, attack="fabricate", severity=0.5, spot=every)
+    e = err(fake)
+    assert e[:4].max() < 1e-6 and e[4:].min() > 0.5
+
+
+def test_spot_check_reproduces_augmented_cnn_segments():
+    rng = np.random.default_rng(0)
+    X = rng.random((64, 3, 32, 32), dtype=np.float32)
+    y = (rng.random(64) > 0.5).astype(np.float32)
+    tcfg, dev = TrainingConfig(epochs=2, batch_size=16, augment=True), torch.device("cpu")
+    r = train_run("cnn", 4, X, y, tcfg, seed=0, device=dev, spot=(2, 3, 1))
+    assert len(r.segments) == 2 and all(seg.aug_state is not None for seg in r.segments)
+    assert spot_errors("cnn", 4, X, y, r.segments, tcfg, dev).max() < 1e-6
+
+
+def test_spot_tolerance_has_margin_and_floor():
+    assert spot_tolerance(np.zeros(3), margin=10.0, floor=1e-4) == 1e-4
+    assert spot_tolerance(np.array([1e-4, 2e-3]), margin=10.0, floor=1e-4) == pytest.approx(0.02)
+
+
+def test_memory_cell_measures_spot_check_stage(tmp_path):
+    from scicheck.config import config_from_dict
+    from scicheck.experiments.performance import memory_cell
+
+    (tmp_path / "processed").mkdir()
+    X = np.random.default_rng(0).integers(0, 256, size=(200, 784), dtype=np.uint8)
+    np.savez_compressed(tmp_path / "processed" / "mnist_200_seed0.npz", X=X)
+    cfg = config_from_dict({
+        "data_dir": str(tmp_path), "architectures": ["ae"], "sizes": [4000],
+        "data": {"mnist": 200}, "training": {"epochs": 10, "batch_size": 32},
+        "judge": {"window": 5, "epochs": 1, "patience": 1},
+        "validate": {"spot_segments": 2, "spot_steps": 3},
+        "performance": {"n_honest": 1, "n_malicious": 1},
+    })
+    row = memory_cell(cfg, "ae", 4000, 0)
+    assert row["spot_mb"] > 0 and row["peak_mb"] >= row["spot_mb"]
+    assert row["total_mb"] == pytest.approx(row["verifier_mb"] + row["scientists_mb"] + row["judge_mb"] + row["spot_mb"])
+
+
+def test_full_decision_requires_every_enabled_check():
+    runs = pd.DataFrame(dict(phi=[0.1, 0.1, 0.5], eta_s=[1.0, 1.0, 1.0], eta_v=1.0, replay_pass=True,
+                             spot_pass=[True, False, True]))
+    assert default_variant(runs) == "at+eta+replay+spot"
+    assert decide(runs, 0.3, 0.4, default_variant(runs)).tolist() == [True, False, False]
+    assert default_variant(runs.drop(columns=["spot_pass", "replay_pass"])) == "at+eta"

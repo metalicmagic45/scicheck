@@ -50,6 +50,10 @@ class ValidateConfig:
     replay: bool = False
     replay_tol: float = 0.02
     psi_max: float = 0.05
+    spot_segments: int = 0
+    spot_steps: int = 50
+    spot_margin: float = 10.0
+    spot_floor: float = 1e-4
 
 
 @dataclass
@@ -68,10 +72,10 @@ class Config:
     device: str = "auto"
     deterministic: bool = False
     architectures: list[str] = field(default_factory=lambda: ["mlp", "cnn", "ae"])
-    sizes: list[int] = field(default_factory=lambda: [100_000, 200_000, 300_000, 400_000, 500_000])
+    sizes: list[int] = field(default_factory=lambda: [100_000, 300_000, 500_000])
     attacks: list[str] = field(default_factory=lambda: ["signflip", "data", "fabricate"])
     severities: list[float] = field(default_factory=lambda: [0.1, 0.3, 0.5])
-    seeds: list[int] = field(default_factory=lambda: [0])
+    seeds: list[int] = field(default_factory=lambda: [0, 1, 2])
     n_honest: int = 15
     n_malicious: int = 5
     train_frac: float = 0.3

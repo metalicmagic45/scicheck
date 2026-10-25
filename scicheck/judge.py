@@ -8,8 +8,10 @@ import numpy as np
 import torch
 
 from .anomaly_transformer import AnomalyTransformer, anomaly_scores, minimax_losses
-from .config import JudgeConfig
+from .config import JudgeConfig, TrainingConfig
+from .data import to_tensors
 from .snapshots import ETA_COL
+from .training import Segment, replay_segment
 
 
 @dataclass
@@ -181,3 +183,13 @@ def validate(judge: Judge, Ts: np.ndarray, theta: float, steps_per_epoch: int | 
     psi = replay_fraction(T, steps_per_epoch, replay_tol) if steps_per_epoch else 0.0
     at_pass, eta_pass, replay_pass = phi <= theta, eta_s >= judge.gamma, psi <= psi_max
     return Verdict(at_pass and eta_pass and replay_pass, phi, eta_s, at_pass, eta_pass, psi, replay_pass)
+
+
+def spot_errors(arch: str, width: int, X: np.ndarray, y: np.ndarray, segments: list[Segment],
+                cfg: TrainingConfig, device: torch.device) -> np.ndarray:
+    Xt, yt = to_tensors(X, y, device)
+    return np.array([replay_segment(arch, width, Xt, yt, seg, cfg, device) for seg in segments])
+
+
+def spot_tolerance(errors: np.ndarray, margin: float, floor: float) -> float:
+    return max(margin * float(errors.max(initial=0.0)), floor)

@@ -13,11 +13,11 @@ import torch
 
 from ..config import Config
 from ..data import load_task_data
-from ..judge import train_judge, validate
+from ..judge import spot_errors, spot_tolerance, train_judge, validate
 from ..models import ARCHS, width_for_target
 from ..training import train_run, verifier_steps
 from ..utils import Timer, derive_seed, resolve_device
-from .common import check_or_write_config
+from .common import check_or_write_config, spot_plan
 
 RESULT_PREFIX = "SCICHECK_RESULT "
 
@@ -44,31 +44,41 @@ def _append(csv: Path, row: dict) -> None:
 def runtime_cell(cfg: Config, arch: str, size: int, seed: int, device: torch.device) -> dict:
     data = load_task_data(ARCHS[arch].dataset, cfg.data_dir, cfg.train_frac, cfg.data_seed, cfg.data)
     width = width_for_target(arch, size)
-    ver = train_run(arch, width, *data.verifier, cfg.training, derive_seed("perf-verifier", arch, size, seed), device,
-                    steps=verifier_steps(cfg.verifier_steps, cfg.training, data.n_train))
+    ver_seed = derive_seed("perf-verifier", arch, size, seed)
+    ver = train_run(arch, width, *data.verifier, cfg.training, ver_seed, device,
+                    steps=verifier_steps(cfg.verifier_steps, cfg.training, data.n_train), spot=spot_plan(cfg, ver_seed))
     sci_seconds, honest_seconds, submissions = 0.0, [], []
     for role, flip, _i, run_seed in _scientist_jobs(cfg, arch, size, seed):
         r = train_run(arch, width, *data.scientist, cfg.training, run_seed, device,
-                      "signflip" if flip > 0 else None, flip)
+                      "signflip" if flip > 0 else None, flip, spot=spot_plan(cfg, run_seed))
         sci_seconds += r.seconds
         if role == "honest":
             honest_seconds.append(r.seconds)
-        submissions.append(r.snapshots)
+        submissions.append(r)
     with Timer(device) as tj:
         judge = train_judge(ver.snapshots, cfg.judge, cfg.validate.rho, device,
                             derive_seed("perf-judge", arch, size, seed))
     vcfg = cfg.validate
     spe = -(-data.n_train // cfg.training.batch_size) if vcfg.replay else None
     with Timer(device) as ts:
-        for s in submissions:
-            validate(judge, s, vcfg.theta, spe, vcfg.replay_tol, vcfg.psi_max)
+        for r in submissions:
+            validate(judge, r.snapshots, vcfg.theta, spe, vcfg.replay_tol, vcfg.psi_max)
     score_s = ts.seconds / len(submissions) if submissions else float("nan")
+    calib_s = spot_s = 0.0
+    if vcfg.spot_segments:
+        with Timer(device) as tc:
+            spot_tolerance(spot_errors(arch, width, *data.verifier, ver.segments, cfg.training, device),
+                           vcfg.spot_margin, vcfg.spot_floor)
+        with Timer(device) as tsp:
+            for r in submissions:
+                spot_errors(arch, width, *data.scientist, r.segments, cfg.training, device)
+        calib_s, spot_s = tc.seconds, tsp.seconds / len(submissions)
     return dict(arch=arch, target_size=size, n_params=ver.n_params, seed=seed, device=str(device),
                 verifier_s=ver.seconds, scientists_s=sci_seconds, judge_s=tj.seconds + ts.seconds,
-                judge_train_s=tj.seconds, score_s=score_s,
+                judge_train_s=tj.seconds, score_s=score_s, spot_calib_s=calib_s, spot_s=spot_s,
                 retrain_s=sum(honest_seconds) / len(honest_seconds) if honest_seconds else float("nan"),
-                verify_s=ver.seconds + tj.seconds + score_s,
-                total_s=ver.seconds + sci_seconds + tj.seconds + ts.seconds)
+                verify_s=ver.seconds + tj.seconds + score_s + calib_s + spot_s,
+                total_s=ver.seconds + sci_seconds + tj.seconds + ts.seconds + calib_s + spot_s * len(submissions))
 
 
 def run_runtime(cfg: Config, device: torch.device) -> None:
@@ -85,7 +95,8 @@ def run_runtime(cfg: Config, device: torch.device) -> None:
                 _append(csv, row)
                 print(f"[runtime {arch} {size} s{seed}] retraining {row['retrain_s']:.1f}s vs SciCheck "
                       f"{row['verify_s']:.1f}s (M0 {row['verifier_s']:.1f} + J {row['judge_train_s']:.1f} "
-                      f"+ score {row['score_s']:.1f})", flush=True)
+                      f"+ score {row['score_s']:.1f} + spot-check {row['spot_calib_s'] + row['spot_s']:.1f})",
+                      flush=True)
 
 
 def _subprocess(job: dict, workdir: Path) -> dict:
@@ -107,25 +118,34 @@ def memory_cell(cfg: Config, arch: str, size: int, seed: int) -> dict:
                   training=asdict(cfg.training), verifier_steps=cfg.verifier_steps)
     with tempfile.TemporaryDirectory(prefix="scicheck_mem_") as tmp:
         tmp = Path(tmp)
-        ver_npy = tmp / "verifier.npy"
+        ver_npy, ver_seed = tmp / "verifier.npy", derive_seed("perf-verifier", arch, size, seed)
         ver = _subprocess(dict(common, stage="train", tag="verifier", partition="verifier", flip=0.0,
-                               seed=derive_seed("perf-verifier", arch, size, seed), out=str(ver_npy)), tmp)
-        sci_peaks, subs = [], []
+                               seed=ver_seed, out=str(ver_npy), spot=spot_plan(cfg, ver_seed),
+                               segments=str(tmp / "verifier.seg")), tmp)
+        sci_peaks, subs, segs = [], [], []
         for role, flip, i, run_seed in _scientist_jobs(cfg, arch, size, seed):
-            npy = tmp / f"{role}_{i}.npy"
+            npy, seg = tmp / f"{role}_{i}.npy", tmp / f"{role}_{i}.seg"
             r = _subprocess(dict(common, stage="train", tag=f"{role}{i}", partition="scientist",
-                                 flip=flip, seed=run_seed, out=str(npy)), tmp)
+                                 flip=flip, seed=run_seed, out=str(npy), spot=spot_plan(cfg, run_seed),
+                                 segments=str(seg)), tmp)
             sci_peaks.append(r["peak_rss_mb"])
             subs.append(str(npy))
+            segs.append(str(seg))
         j = _subprocess(dict(stage="judge", tag="judge", verifier=str(ver_npy), submissions=subs,
                              judge=asdict(cfg.judge), rho=cfg.validate.rho, theta=cfg.validate.theta,
                              seed=derive_seed("perf-judge", arch, size, seed)), tmp)
+        spot_mb = float("nan")
+        if cfg.validate.spot_segments:
+            spot_mb = _subprocess(dict(common, stage="spot", tag="spot", verifier=str(tmp / "verifier.seg"),
+                                       submissions=segs, margin=cfg.validate.spot_margin,
+                                       floor=cfg.validate.spot_floor), tmp)["peak_rss_mb"]
     sci_mb = sum(sci_peaks)
+    stage_peaks = [ver["peak_rss_mb"], j["peak_rss_mb"], *sci_peaks] + ([spot_mb] if spot_mb == spot_mb else [])
     return dict(arch=arch, target_size=size, n_params=ver["n_params"], seed=seed,
-                verifier_mb=ver["peak_rss_mb"], scientists_mb=sci_mb, judge_mb=j["peak_rss_mb"],
+                verifier_mb=ver["peak_rss_mb"], scientists_mb=sci_mb, judge_mb=j["peak_rss_mb"], spot_mb=spot_mb,
                 scientist_mb=sci_mb / len(sci_peaks) if sci_peaks else float("nan"),
-                peak_mb=max([ver["peak_rss_mb"], j["peak_rss_mb"], *sci_peaks]),
-                total_mb=ver["peak_rss_mb"] + sci_mb + j["peak_rss_mb"])
+                peak_mb=max(stage_peaks),
+                total_mb=ver["peak_rss_mb"] + sci_mb + j["peak_rss_mb"] + (spot_mb if spot_mb == spot_mb else 0.0))
 
 
 def run_memory(cfg: Config) -> None:
@@ -141,8 +161,8 @@ def run_memory(cfg: Config) -> None:
                 row = memory_cell(cfg, arch, size, seed)
                 _append(csv, row)
                 print(f"[memory {arch} {size} s{seed}] peak {row['peak_mb']:.0f} MB "
-                      f"(M0 {row['verifier_mb']:.0f}, scientist {row['scientist_mb']:.0f}, J {row['judge_mb']:.0f})",
-                      flush=True)
+                      f"(M0 {row['verifier_mb']:.0f}, scientist {row['scientist_mb']:.0f}, J {row['judge_mb']:.0f}, "
+                      f"spot-check {row['spot_mb']:.0f})", flush=True)
 
 
 def run_performance(cfg: Config, sweeps: list[str] | None = None, device: str | None = None) -> None:

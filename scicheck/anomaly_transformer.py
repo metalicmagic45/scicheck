@@ -1,5 +1,3 @@
-"""Anomaly Transformer (Xu et al., ICLR 2022), ported from github.com/thuml/Anomaly-Transformer."""
-
 from __future__ import annotations
 
 import math

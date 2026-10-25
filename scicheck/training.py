@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .attacks import ATTACKS, SignFlipAttack, fabricate_tail, poison_data
+from .attacks import ATTACKS, FABRICATE_NOISE, SignFlipAttack, fabricate_tail, poison_data
 from .config import TrainingConfig
 from .data import to_tensors
 from .models import ARCHS, count_params, tracked_layers
@@ -18,12 +18,50 @@ AUG_PAD = 4
 
 
 @dataclass
+class Segment:
+    start: int
+    model_state: dict
+    opt_state: dict
+    aug_state: torch.Tensor | None
+    batches: list[torch.Tensor] = field(default_factory=list)
+    end_weights: torch.Tensor | None = None
+
+
+@dataclass
 class RunResult:
     snapshots: np.ndarray
     final_loss: float
     seconds: float
     n_params: int
     history: list[dict] = field(default_factory=list)
+    segments: list[Segment] = field(default_factory=list)
+
+
+def _cpu(obj):
+    if isinstance(obj, torch.Tensor):
+        return obj.detach().to("cpu", copy=True)
+    if isinstance(obj, dict):
+        return {k: _cpu(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_cpu(v) for v in obj]
+    return obj
+
+
+def _flat(params) -> torch.Tensor:
+    return torch.cat([p.detach().reshape(-1) for p in params])
+
+
+def plan_segments(n_steps: int, steps: int, n_segments: int, seed: int) -> list[int]:
+    total = n_steps // steps
+    picks = np.random.default_rng(seed).choice(total, size=min(n_segments, total), replace=False)
+    return sorted(int(i) * steps for i in picks)
+
+
+def _loss(model: nn.Module, loss_fn: nn.Module, task: str, xb: torch.Tensor, yb: torch.Tensor) -> torch.Tensor:
+    out = model(xb)
+    if task == "binary":
+        out = out.squeeze(-1)
+    return loss_fn(out, yb)
 
 
 def augment_images(x: torch.Tensor, gen: torch.Generator) -> torch.Tensor:
@@ -76,6 +114,7 @@ def train_run(
     severity: float = 0.0,
     eval_data: tuple[np.ndarray, np.ndarray] | None = None,
     steps: int | None = None,
+    spot: tuple[int, int, int] | None = None,
 ) -> RunResult:
     if attack is not None and attack not in ATTACKS:
         raise ValueError(f"unknown attack {attack!r}, expected one of {ATTACKS}")
@@ -103,6 +142,10 @@ def train_run(
         raise ValueError(f"fabricate severity {severity} must leave at least one genuine epoch")
     step = 0
     recorder = SnapshotRecorder(model, tracked_layers(model))
+    k = spot[1] if spot else 0
+    starts = set(plan_segments(n_steps, k, spot[0], spot[2])) if spot else set()
+    segments: dict[int, Segment] = {}
+    active: Segment | None = None
     epoch_losses: list[torch.Tensor] = []
     history: list[dict] = []
     eval_seconds = 0.0
@@ -117,11 +160,13 @@ def train_run(
                 if step >= stop:
                     break
                 idx = perm[i:i + bs]
+                if step in starts:
+                    active = segments[step] = Segment(step, _cpu(model.state_dict()), _cpu(opt.state_dict()),
+                                                      aug_gen.get_state() if augment else None)
+                if active is not None:
+                    active.batches.append(idx.cpu())
                 xb = augment_images(Xt[idx], aug_gen) if augment else Xt[idx]
-                out = model(xb)
-                if spec.task == "binary":
-                    out = out.squeeze(-1)
-                loss = loss_fn(out, yt[idx])
+                loss = _loss(model, loss_fn, spec.task, xb, yt[idx])
                 opt.zero_grad(set_to_none=False)
                 loss.backward()
                 if flipper is not None:
@@ -130,6 +175,9 @@ def train_run(
                 recorder.record(loss)
                 epoch_losses.append(loss.detach())
                 step += 1
+                if active is not None and step == active.start + k:
+                    active.end_weights = _flat(params).cpu()
+                    active = None
             if Xe is not None and len(epoch_losses) == steps_per_epoch:
                 with Timer(device) as te:
                     history.append({"epoch": epoch + 1, "train_loss": float(torch.stack(epoch_losses).mean()),
@@ -137,7 +185,17 @@ def train_run(
                 eval_seconds += te.seconds
         snapshots = recorder.to_numpy()
     if attack == "fabricate":
-        snapshots = fabricate_tail(snapshots, n_steps, steps_per_epoch)
+        snapshots = fabricate_tail(snapshots, n_steps, steps_per_epoch, FABRICATE_NOISE,
+                                   derive_seed(seed, "fabricate"))
+    if starts and step < n_steps:
+        last = (_cpu(model.state_dict()), _cpu(opt.state_dict()), aug_gen.get_state() if augment else None)
+        for start in starts - segments.keys():
+            segments[start] = Segment(start, *last)
+        for seg in segments.values():
+            while len(seg.batches) < k:
+                seg.batches.append(torch.randperm(n, generator=batch_gen)[:bs])
+            if seg.end_weights is None:
+                seg.end_weights = _flat(params).cpu()
 
     return RunResult(
         snapshots=snapshots,
@@ -145,4 +203,30 @@ def train_run(
         seconds=t.seconds - eval_seconds,
         n_params=count_params(model),
         history=history,
+        segments=[segments[start] for start in sorted(segments)],
     )
+
+
+def replay_segment(arch: str, width: int, Xt: torch.Tensor, yt: torch.Tensor, seg: Segment, cfg: TrainingConfig,
+                   device: torch.device) -> float:
+    spec = ARCHS[arch]
+    model = spec.build(width).to(device)
+    model.load_state_dict(seg.model_state)
+    params = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.Adam(params, lr=cfg.lr, foreach=True)
+    opt.load_state_dict(seg.opt_state)
+    loss_fn = nn.BCEWithLogitsLoss() if spec.task == "binary" else nn.MSELoss()
+    aug_gen = None
+    if seg.aug_state is not None:
+        aug_gen = torch.Generator()
+        aug_gen.set_state(seg.aug_state)
+    start = _flat(params)
+    for idx in seg.batches:
+        idx = idx.to(device)
+        xb = augment_images(Xt[idx], aug_gen) if aug_gen is not None else Xt[idx]
+        loss = _loss(model, loss_fn, spec.task, xb, yt[idx])
+        opt.zero_grad(set_to_none=False)
+        loss.backward()
+        opt.step()
+    w = _flat(params)
+    return float((w - seg.end_weights.to(device)).norm() / (w - start).norm().clamp_min(1e-12))

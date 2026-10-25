@@ -8,7 +8,7 @@ from typing import Callable, Iterable
 import torch
 
 from ..config import Config
-from ..utils import write_json
+from ..utils import derive_seed, write_json
 
 _FREE_KEYS = {"device", "out_dir", "data_dir", "name", "architectures", "sizes", "severities", "seeds"}
 
@@ -32,6 +32,11 @@ def check_or_write_config(cfg: Config, out: Path, filename: str = "config.json")
         if not path.exists():
             raise
         check_or_write_config(cfg, out, filename)
+
+
+def spot_plan(cfg: Config, seed: int) -> tuple[int, int, int] | None:
+    v = cfg.validate
+    return (v.spot_segments, v.spot_steps, derive_seed(seed, "spot")) if v.spot_segments else None
 
 
 def _worker_device(devices: list[str]) -> torch.device:
